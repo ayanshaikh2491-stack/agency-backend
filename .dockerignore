@@ -44,10 +44,11 @@ data/
 *.db-shm
 *.db-wal
 pb_data/
-# freellmapi build artifacts — Dockerfile COPYs only what it needs explicitly
+# freellmapi build artifacts — Dockerfile COPYs only what it needs explicitly.
+# Keep cli/package.json (npm ci needs every workspace manifest) — exclude only its source.
 freellmapi/server/node_modules/
 freellmapi/node_modules/
-freellmapi/cli/
+freellmapi/cli/src/
 freellmapi/desktop/src/
 freellmapi/client/src/
 freellmapi/docs/
