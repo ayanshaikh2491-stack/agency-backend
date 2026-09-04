@@ -1,0 +1,15 @@
+name: Keep-alive ping
+# Render free service 15 min idle pe soti hai. Ye har 10 min health ping
+# bhejta hai = legitimate monitoring + service awake rehti hai.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health
+        run: |
+          curl -sS -m 30 "${{ secrets.BACKEND_URL }}/api/health" \
+            -o /dev/null -w "HTTP %{http_code}\n"
