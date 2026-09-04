@@ -1,0 +1,38 @@
+{
+  "ceo": {
+    "role": "Co-founder & strategic brain — orchestrates, delegates, reports to boss",
+    "skills_folder": "ceo_skills_repo",
+    "skill_count": 15,
+    "core": true
+  },
+  "sba": {
+    "role": "Sales / lead-gen agent",
+    "skills_folder": "sba_skills_repo",
+    "skill_count": 8,
+    "core": true
+  },
+  "seo": {
+    "role": "Search & AI-visibility agent (SEO/AEO/GEO)",
+    "skills_folder": "seo_skills_repo",
+    "skill_count": 6,
+    "core": true
+  },
+  "social": {
+    "role": "Content & social-media agent",
+    "skills_folder": "social_skills_repo",
+    "skill_count": 6,
+    "core": true
+  },
+  "website": {
+    "role": "Design / frontend / deploy agent",
+    "skills_folder": "website_skills_repo",
+    "skill_count": 18,
+    "core": true
+  },
+  "aws": {
+    "role": "AWS cloud infra & deployment agent",
+    "skills_folder": "aws_skills_repo",
+    "skill_count": 3,
+    "core": false
+  }
+}

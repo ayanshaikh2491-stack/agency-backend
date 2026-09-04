@@ -1,0 +1,19 @@
+{
+  "id": "ws_agency",
+  "name": "Agency Workspace",
+  "client_name": "TAGS Agency",
+  "description": "Agency-level workspace, bound to Supabase schema ws_agency.",
+  "created_at": "2026-09-03T16:25:41.708385+00:00",
+  "agents": [
+    "sba",
+    "seo",
+    "content",
+    "website",
+    "ads",
+    "social",
+    "analytics",
+    "analyzing",
+    "memory"
+  ],
+  "client_context": null
+}

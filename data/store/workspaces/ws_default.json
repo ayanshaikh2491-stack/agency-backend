@@ -1,0 +1,19 @@
+{
+  "id": "ws_default",
+  "name": "Default Workspace",
+  "client_name": "Default Client",
+  "description": "Default workspace, bound to Supabase schema ws_default.",
+  "created_at": "2026-09-03T16:25:41.724761+00:00",
+  "agents": [
+    "sba",
+    "seo",
+    "content",
+    "website",
+    "ads",
+    "social",
+    "analytics",
+    "analyzing",
+    "memory"
+  ],
+  "client_context": null
+}
