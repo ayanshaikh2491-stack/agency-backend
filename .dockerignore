@@ -42,4 +42,15 @@ data/
 *.sqlite
 *.sqlite3
 *.db
+*.db-shm
+*.db-wal
 pb_data/
+# freellmapi build artifacts — Dockerfile COPYs only what it needs explicitly
+freellmapi/server/node_modules/
+freellmapi/node_modules/
+freellmapi/cli/
+freellmapi/desktop/src/
+freellmapi/client/src/
+freellmapi/docs/
+freellmapi/repo-assets/
+freellmapi/scripts/

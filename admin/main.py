@@ -26,6 +26,7 @@ from admin.api.routes import social as social_routes
 from admin.api.routes import workflows as workflows_routes
 from admin.api.routes import website as website_routes
 from admin.api.routes import analyzing as analyzing_routes
+from admin.freeapi_proxy import router as freeapi_router
 from admin.api.routes import extra as extra_routes
 from admin.api.routes import store as store_routes
 from admin.api.routes import agent_aliases as agent_aliases_routes
@@ -178,6 +179,7 @@ app.include_router(agent_aliases_routes._seo_router)  # /api/agents/seo-engine/*
 app.include_router(agents_crud_routes.router)        # /api/agents/custom/*
 app.include_router(multiagent_routes.router)         # /api/ceo/run + /api/ceo/run/custom (multi-agent)
 app.include_router(scheduler_routes.router)          # /api/ceo/schedules — autonomous CEO triggers (L1)
+app.include_router(freeapi_router)                  # /freeapi/* — FreeLLMAPI dashboard proxy (internal Node)
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
