@@ -28,6 +28,8 @@ RUN npm ci
 # Compile the Node server TypeScript to dist/. The client dashboard is consumed
 # prebuilt (see COPY freellmapi/client/dist below) so we skip `npm run build -w client`.
 COPY freellmapi/shared ./shared
+COPY freellmapi/server/package.json ./server/
+COPY freellmapi/server/tsconfig.json ./server/
 COPY freellmapi/server/src ./server/src
 RUN npm run build -w server
 
