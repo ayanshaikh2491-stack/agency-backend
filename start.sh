@@ -61,7 +61,7 @@ if [ -n "$UNIFIED_API_KEY" ]; then
   node -e '
     const Database = require("better-sqlite3");
     const db = new Database(process.env.FREEAPI_DB_PATH || "/app/server/data/freeapi.db");
-    db.prepare("INSERT INTO settings (key, value) VALUES (\"unified_api_key\", ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(process.argv[1]);
+    db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run("unified_api_key", process.argv[1]);
     console.log("[seed] unified key pinned");
     db.close();
   ' "$UNIFIED_API_KEY" || echo "[start] WARN: unified key pin failed"

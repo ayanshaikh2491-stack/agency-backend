@@ -42,6 +42,10 @@ FROM python:3.11-slim-bookworm
 # Node runtime binary from the build image (npm itself not needed at runtime).
 COPY --from=nodebuild /usr/local/bin/node /usr/local/bin/node
 
+# curl for start.sh boot health-checks and seeding against the internal proxy.
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
 ENV PATH="/usr/local/bin:${PATH}"
 
