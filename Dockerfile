@@ -41,7 +41,6 @@ FROM python:3.11-slim-bookworm
 
 # Node runtime binary from the build image (npm itself not needed at runtime).
 COPY --from=nodebuild /usr/local/bin/node /usr/local/bin/node
-COPY --from=nodebuild /usr/lib/node_modules/npm /usr/lib/node_modules/npm
 
 ENV NODE_ENV=production
 ENV PATH="/usr/local/bin:${PATH}"
