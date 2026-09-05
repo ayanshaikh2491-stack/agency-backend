@@ -18,7 +18,9 @@ CUSTOM_ENDPOINTS_JSON="${CUSTOM_ENDPOINTS_JSON:-}"  # custom OpenAI-compatible p
 
 echo "[start] booting FreeLLMAPI on internal port $FREEAPI_PORT"
 
-NODE_ENV=production PORT="$FREEAPI_PORT" node server/dist/index.js > /var/log/freeapi.log 2>&1 &
+# HOST=127.0.0.1 keeps the proxy loopback-only so Render detects only the
+# FastAPI port as public (healthCheckPath hits the backend, not the proxy).
+NODE_ENV=production HOST=127.0.0.1 PORT="$FREEAPI_PORT" node server/dist/index.js > /var/log/freeapi.log 2>&1 &
 FREEAPI_PID=$!
 echo "[start] FreeLLMAPI pid=$FREEAPI_PID (port $FREEAPI_PORT)"
 
