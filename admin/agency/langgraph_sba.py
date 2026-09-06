@@ -29,6 +29,11 @@ from admin.tools.chrome_tool import (
     ChromeTool,
     execute_chrome_tool,
 )
+from admin.tools.sba_tools import SBA_TOOLS
+
+# Full SBA toolkit: browserless lead finder + lead strategy/management
+# tools first, Chrome tools only as a local-dev browsing fallback.
+_SBA_ALL_TOOLS: list[dict[str, Any]] = list(SBA_TOOLS) + list(CHROME_TOOLS)
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +352,7 @@ async def call_llm(state: SBAGraphState) -> dict:
         response = await client_api.chat.completions.create(
             model=settings.WORKSPACE_AGENT_MODEL,
             messages=oll_messages,
-            tools=CHROME_TOOLS,
+            tools=_SBA_ALL_TOOLS,
             tool_choice="auto",
         )
     except Exception as exc:
@@ -452,7 +457,17 @@ async def run_tools(state: SBAGraphState) -> dict:
         logger.info("SBA graph executing tool: %s(%s)", tool_name, json.dumps(tool_args))
 
         try:
-            result_text = await execute_chrome_tool(tool_name, tool_args, chrome)
+            from admin.tools.chrome_tool import CHROME_TOOL_DISPATCH
+
+            if tool_name in CHROME_TOOL_DISPATCH:
+                result_text = await execute_chrome_tool(tool_name, tool_args, chrome)
+            else:
+                # SBA_TOOLS (find_leads_http, detect_lead_sources, save_lead_record,
+                # qualify_lead, ...) — browserless, no chrome needed.
+                from admin.tools.sba_tools import execute_sba_tool
+
+                sb = await execute_sba_tool(tool_name, tool_args)
+                result_text = json.dumps(sb, default=str)[:8000]
         except Exception as exc:
             result_text = f"Error executing {tool_name}: {exc}"
 
