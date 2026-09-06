@@ -31,7 +31,14 @@ SOURCES = ["google_maps", "yelp", "yellowpages", "bing_maps", "facebook_pages"]
 
 # Booking/aggregator domains that never count as a real business website
 _AGGREGATORS = ("opentable", "flexbook", "modento", "servicetitan", "schedulicity",
-                "booksy", "yelp.com", "yellowpages.com", "facebook.com", "instagram.com")
+                "booksy", "yelp.com", "yellowpages.com", "facebook.com", "instagram.com",
+                # Directory/marketplace hosts that rank for local queries worldwide
+                "practo", "apollo247", "justdial", "dentee", "lybrate", "1mg.com",
+                "tripadvisor", "wikipedia.org", "wikidata", "reddit.com", "quora.com",
+                "angi.com", "homeadvisor", "thumbtack", "porch.com", "networx.com")
+
+# Emails whose "domain" is actually an asset filename (img-doctors@1x.jpg)
+_JUNK_EMAIL_TLDS = ("jpg", "jpeg", "png", "gif", "webp", "svg", "css", "js", "webm", "mp4")
 
 
 def _is_aggregator(url: str) -> bool:
@@ -149,12 +156,17 @@ def _extract_contact(html: str, base_domain: str) -> tuple[str, str]:
         # Email: prefer one whose domain matches the business site.
         for m in _EMAIL_RE.finditer(text):
             cand = m.group(0).lower()
+            if cand.rsplit(".", 1)[-1] in _JUNK_EMAIL_TLDS:
+                continue  # asset filename, not an address (img-x@1x.jpg)
             if base_domain and base_domain in cand:
                 email = cand
                 break
         if not email:
-            m = _EMAIL_RE.search(text)
-            email = m.group(0).lower() if m else ""
+            for m in _EMAIL_RE.finditer(text):
+                cand = m.group(0).lower()
+                if cand.rsplit(".", 1)[-1] not in _JUNK_EMAIL_TLDS:
+                    email = cand
+                    break
         pm = _PHONE_RE.search(text)
         phone = pm.group(0) if pm else ""
     except Exception as exc:  # noqa: BLE001
@@ -199,6 +211,9 @@ def find_leads_lightweight(
                 website = website.split()[0].split("›")[0].strip()
             if website and not website.startswith("http"):
                 website = "https://" + website.lstrip("/")
+            # Directory/marketplace hosts are not businesses — skip the card.
+            if website and _is_aggregator(website):
+                continue
             snippet = blk.text(separator=" ", strip=True)
             phone_m = _PHONE_RE.search(snippet)
             phone = phone_m.group(0) if phone_m else ""
@@ -208,6 +223,7 @@ def find_leads_lightweight(
             # Deep step: pull real email/phone from the business's own site.
             email = ""
             base_domain = ""
+            site_html = ""
             if website:
                 try:
                     from urllib.parse import urlparse
@@ -236,6 +252,17 @@ def find_leads_lightweight(
             }, "bing_light")
             if email:
                 lead["email"] = email
+            # Geo filter: Bing serves IP-localized results (an India egress
+            # returns Delhi dentists for an Austin query). Drop cards whose
+            # name+snippet never mention the requested city or state.
+            _geo = f"{name} {snippet}".lower()
+            _city_l = city.lower()
+            _state_l = state.lower()
+            if _city_l not in _geo and _state_l not in _geo:
+                # last chance: the deep-crawled site page may name the city
+                _site_txt = (site_html or "")[:20000].lower()
+                if _city_l not in _site_txt and _state_l not in _site_txt:
+                    continue
             leads.append(lead)
             if len(leads) >= max_per_source:
                 break

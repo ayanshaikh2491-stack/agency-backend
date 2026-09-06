@@ -76,6 +76,37 @@ LEAD_SOURCE_MAP: dict[str, dict[str, list[str]]] = {
 }
 
 
+def _find_leads_http(category: str, city: str, state: str, max_per_source: int = 5) -> dict[str, Any]:
+    """Browserless lead finder — OSM Overpass first, Bing-light fallback.
+
+    OSM gives geo-accurate real local businesses (clean JSON, no HTML parse,
+    no Chrome, no API key) with phone/website/email tags; missing emails are
+    deep-filled from each business's own site. Same normalized lead shape
+    the autopilot uses, so the SBA agent gets contactable leads without
+    ever touching Chrome.
+    """
+    try:
+        from admin.tools.osm_lead_source import find_leads_osm
+
+        leads = find_leads_osm(category, city, state, max_per_source)
+        source_used = "osm_overpass"
+        if not leads:
+            # Fallback: old Bing HTML path (geo-fuzzy but sometimes works)
+            from admin.tools.sba_lead_sources import find_leads_lightweight
+
+            leads = find_leads_lightweight(category, city, state, max_per_source)
+            source_used = "bing_light"
+        return {
+            "count": len(leads),
+            "leads": leads,
+            "source": source_used,
+            "note": "Lightweight HTTP finder (no Chrome). Contactable leads with phone/website/email.",
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.exception("find_leads_http failed")
+        return {"count": 0, "leads": [], "error": f"find_leads_http failed: {str(e)[:200]}"}
+
+
 def detect_lead_sources(industry: str, market: str = "global") -> dict[str, Any]:
     """Analyse client industry and market to recommend lead sources.
 
@@ -312,6 +343,23 @@ SBA_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "find_leads_http",
+            "description": "Find REAL local-business leads WITHOUT a browser. Searches the web via plain HTTP (no Chrome), crawls each business's own website, and returns contactable leads with name, business, phone, email, website. This is the DEFAULT lead-finding tool — use it instead of Chrome tools.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "description": "Business category to search (e.g. 'dentist', 'hvac contractor', 'roofing', 'salon', 'gym')"},
+                    "city": {"type": "string", "description": "City name (e.g. 'Austin')"},
+                    "state": {"type": "string", "description": "State name or code (e.g. 'TX', 'Texas')"},
+                    "max_per_source": {"type": "integer", "description": "Max leads to return (default 5, max 10)"},
+                },
+                "required": ["category", "city", "state"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "detect_lead_sources",
             "description": "Analyse client industry and market to recommend the BEST platforms for finding leads. Use this FIRST when starting lead gen for a new client.",
             "parameters": {
@@ -435,6 +483,12 @@ async def execute_sba_tool(tool_name: str, args: dict[str, Any]) -> dict[str, An
     only when actually a coroutine.
     """
     dispatch = {
+        "find_leads_http": lambda: _find_leads_http(
+            category=args.get("category", ""),
+            city=args.get("city", ""),
+            state=args.get("state", ""),
+            max_per_source=min(int(args.get("max_per_source", 5) or 5), 10),
+        ),
         "detect_lead_sources": lambda: detect_lead_sources(
             args.get("industry", ""), args.get("market", "global"),
         ),

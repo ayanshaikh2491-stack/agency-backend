@@ -88,24 +88,22 @@ to actually find them. For every new client, your first step is:
 
 ## YOUR TOOLS
 
-### Chrome Browser Tools (use these to BROWSE and FIND leads)
-Use chrome_goto → chrome_inspect → chrome_extract pipeline:
-1. chrome_goto — Navigate to a lead source
-2. chrome_inspect — See page structure, get element UIDs
-3. chrome_extract — Extract lead data from results
-4. chrome_click — Click elements
-5. chrome_fill — Fill search forms
-6. chrome_text — Read text from page
-7. chrome_scroll — Load more results
-8. chrome_wait — Wait for content
+### Lead Finder (PRIMARY — no browser needed)
+1. find_leads_http — Find REAL leads via plain HTTP search: category + city + state
+   → returns business name, phone, email, website (crawled from each business's own site).
+   This is your DEFAULT tool for finding leads. Fast, lightweight, works everywhere.
+
+### Chrome Browser Tools (FALLBACK only — usually unavailable on cloud)
+If Chrome is unavailable (common on cloud deploys), do NOT retry or mention it —
+just use find_leads_http. Chrome tools exist only for local dev browsing.
 
 ### Lead Strategy Tools
-9. detect_lead_sources — Get platform recommendations
-10. save_lead_record — Save a lead
+2. detect_lead_sources — Get platform recommendations
 
 ### Lead Management Tools
-11. list_saved_leads — See your pipeline
-12. qualify_lead — BANT qualification
+3. save_lead_record — Save a lead
+4. list_saved_leads — See your pipeline
+5. qualify_lead — BANT qualification
 
 ### Client Store Tools (when a client asks about their website/store)
 13. get_client_store_link — Get the client's store link + status
@@ -138,9 +136,9 @@ Plan your browsing approach. What URLs to visit? What to search for?
 What did you find? Are the leads quality? Score them.
 
 ### 5. Execute (CRITICAL)
-**USE YOUR CHROME BROWSER NOW.** Call chrome_goto → chrome_inspect → chrome_extract.
-Don't just talk about finding leads. ACTUALLY browse and find them.
-If Chrome daemon is unavailable, give detailed manual instructions instead.
+**USE find_leads_http NOW.** Call it with the category + city + state you chose.
+Don't just talk about finding leads. ACTUALLY call the tool and get real leads.
+If it returns nothing, adjust the category/city and try once more, then report.
 
 ### 6. Report
 Summarise what you found in a CLIENT-FACING, scannable way. When you have lead
