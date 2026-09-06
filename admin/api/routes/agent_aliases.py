@@ -13,6 +13,7 @@ actual LLM agent responses, scoped to the client's workspace.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -112,17 +113,18 @@ async def api_agent_chat(agent_id: str, body: dict[str, Any]) -> dict[str, Any]:
     if not message:
         raise HTTPException(400, "Message is required")
 
-    # CEO-gated: the boss may ONLY talk to the CEO, never a worker directly.
-    # All real work flows through POST /api/ceo/chat -> CEO delegation.
-    # This guard runs BEFORE slug validation so any boss→worker chat attempt
-    # (including unknown slugs like "sba") is rejected with a clear pointer.
-    raise HTTPException(
-        426,
-        detail=(
-            "Direct worker chat is disabled. The boss talks only to the CEO. "
-            f"Use POST /api/ceo/chat and let the CEO delegate to {agent_id}."
-        ),
-    )
+    # CEO-gated by default: the boss talks only to the CEO, who delegates.
+    # Set AGENT_DIRECT_CHAT=1 to allow direct boss→worker chat (e.g. from the
+    # frontend agent page) — the routing/expert-mode path below still applies.
+    if os.getenv("AGENT_DIRECT_CHAT", "") != "1":
+        raise HTTPException(
+            426,
+            detail=(
+                "Direct worker chat is disabled. The boss talks only to the CEO. "
+                f"Use POST /api/ceo/chat and let the CEO delegate to {agent_id}. "
+                "(Set AGENT_DIRECT_CHAT=1 to enable direct chat.)"
+            ),
+        )
 
     if agent_id not in AGENT_SLUG_MAP:
         raise HTTPException(404, f"Unknown agent: {agent_id}")
