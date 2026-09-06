@@ -87,7 +87,7 @@ if [ -n "$PROVIDER_KEYS_JSON" ] && [ -n "$seed_token" ]; then
           headers: { Authorization: "Bearer " + process.env.SEED_TOKEN },
         });
         const body = await r.json();
-        const keys = body.keys || body || [];
+        const keys = Array.isArray(body) ? body : (body.keys || []);
         for (const k of keys) existing.add(k.platform + ":" + (k.label || ""));
       } catch (e) { console.log("[seed] existing-key fetch failed:", e.message); }
       for (const it of list) {
@@ -118,7 +118,7 @@ if [ -n "$CUSTOM_ENDPOINTS_JSON" ] && [ -n "$seed_token" ]; then
           headers: { Authorization: "Bearer " + process.env.SEED_TOKEN },
         });
         const body = await r.json();
-        const keys = body.keys || body || [];
+        const keys = Array.isArray(body) ? body : (body.keys || []);
         for (const k of keys) if (k.baseUrl) existing.add(k.baseUrl);
       } catch (e) { console.log("[seed] existing-custom fetch failed:", e.message); }
       for (const it of list) {
