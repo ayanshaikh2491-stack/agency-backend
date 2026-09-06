@@ -105,12 +105,22 @@ Clear, direct, actionable. No fluff.
 - **receive_sba_handoff**: Process an SBA handoff and create workspace (Q17)
 - **review_agent_output**: Review and approve/reject agent work (Q20)
 - **route_error_fix**: Route error recovery to the right agent (Q21)
+- **system_selfcheck**: Full system scan (imports/DB/LLM/agents) — run BEFORE asking the boss anything is broken; fix what you find yourself
+- **heal_agent**: Self-heal a failed agent (runtime module install + retry). Agent error aaye to PEHLA action yehi hai — boss ko mat bulaao
 - **generate_report**: Create weekly/monthly agency reports (Q23)
 - **get_cross_workspace_knowledge**: Share learnings across workspaces (CRITICAL)
 - **get_client_store_link**: Get the client's storefront link + status (give to client)
 - **create_store_client_account**: Create the client's store login (email/password)
 - **list_store_products**: See what products the client added to their store
 - **publish_client_store**: Rebuild + deploy the client's live site from their store
+
+## SELF-REPAIR PROTOCOL (critical — boss ko bother mat karo)
+Jab BHI koi agent error kare (ModuleNotFoundError, tool crash, 429, timeout, DB fail):
+1. **heal_agent** call karo turant (error text ke saath) — wo runtime module fix + retry karta hai.
+2. Fail rahe to **system_selfcheck** chalao — poora system scan karke exact badCheez batayega.
+3. Selfcheck jo issue de, usko khud fix karne ki koshish karo (heal_agent per agent).
+4. Sirf tab boss ko batao jab: credential/API-key chahiye (CEO nahi bana sakta), ya 3 heal attempts fail ho jayein.
+Kabhi bhi "platform issue hai, boss dekho" type message MAT bhejo pehle self-repair try kiye bina. Boss ka time client work mein hona chahiye, devops mein nahi.
 
 ## Your CEO skills (your own brain — use them, don't just follow orders)
 You are NOT a bot. You have a rich skill set that makes you think and report like a
@@ -415,6 +425,20 @@ CEO_TOOLS = [
                 },
                 "required": ["workspace_id", "error_type", "severity", "description"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "system_selfcheck",
+            "description": (
+                "Full system health scan WITHOUT bothering the boss: verifies every "
+                "critical import/module, DB connectivity, LLM (freeapi) reachability, "
+                "and pings each workspace agent. Run this proactively at session "
+                "start, after any deploy, or whenever ANY agent errors out — then "
+                "fix what it finds (fix via heal_agent / route_error_fix) yourself."
+            ),
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -882,6 +906,9 @@ async def _execute_ceo_tool(name: str, args: dict) -> str:
 
     elif name == "route_error_fix":
         return await _tool_route_error(args)
+
+    elif name == "system_selfcheck":
+        return _tool_system_selfcheck()
 
     elif name == "heal_agent":
         return await _tool_heal_agent(args)
@@ -1735,16 +1762,63 @@ async def _tool_route_error(args: dict) -> str:
 
 
 async def _tool_heal_agent(args: dict) -> str:
-    """CEO self-heal: detect a failed agent run, fix/retry, escalate if needed."""
+    """CEO self-heal: module fix first (runtime pip), then retry the agent."""
     from admin.agency.self_heal import heal_and_report
+
+    # NEW: if the error names a missing module, self-install it first so the
+    # retry actually has a chance. This is what unblocked past incidents
+    # (admin.runtime, dns/dnspython) without the boss intervening.
+    error_text = args.get("error", "") or ""
+    if "ModuleNotFoundError" in error_text or "No module named" in error_text:
+        try:
+            from admin.agency.runtime_fix import fix_module_error
+
+            fix = fix_module_error(error_text)
+            if fix.get("ok"):
+                args = dict(args)
+                args["context"] = (args.get("context", "") + f"\n[self-fix applied: {fix['installed']} installed at runtime]").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("runtime module fix failed: %s", exc)
 
     return await heal_and_report(
         slug=args.get("agent_type") or args.get("slug", ""),
         workspace_id=args.get("workspace_id", ""),
         task=args.get("task", ""),
         context=args.get("context", ""),
-        error=args.get("error", ""),
+        error=error_text,
     )
+
+
+def _tool_system_selfcheck() -> str:
+    """CEO doctor: scan imports, DB, LLM, agents — return boss-readable report."""
+    import json as _json
+
+    from admin.agency.runtime_fix import system_selfcheck
+
+    try:
+        report = system_selfcheck()
+    except Exception as exc:  # noqa: BLE001
+        return f"SELFCHECK CRASHED: {type(exc).__name__}: {exc}"
+
+    s = report.get("summary", {})
+    lines = []
+    if s.get("healthy"):
+        lines.append("SYSTEM HEALTHY ✅ — sab imports, DB, LLM aur agents OK.")
+    else:
+        lines.append("SYSTEM ISSUES FOUND ⚠️:")
+        if s.get("bad_imports"):
+            lines.append("- Missing imports: " + ", ".join(s["bad_imports"]) + " → heal_agent se runtime fix karo")
+        if not s.get("db_ok"):
+            lines.append(f"- DB: {report['db'].get('error', 'unreachable')}")
+        if not s.get("llm_ok"):
+            lines.append(f"- LLM: {report['llm'].get('error') or report['llm']}")
+        if s.get("bad_agents"):
+            lines.append("- Agents failing: " + ", ".join(s["bad_agents"]) + " → heal_agent per agent")
+    bad = [r for r in report.get("agents", []) if isinstance(r, dict) and not r.get("ok")]
+    for b in bad[:4]:
+        lines.append(f"  · {b.get('agent')}: {str(b.get('detail', ''))[:120]}")
+    lines.append("(raw: " + _json.dumps(report, default=str)[:600] + ")")
+    return "\n".join(lines)
 
 
 async def _tool_generate_report(args: dict) -> str:
