@@ -26,10 +26,14 @@ router = APIRouter()
 
 FREEAPI_INTERNAL = os.getenv("FREEAPI_INTERNAL_URL", "http://127.0.0.1:3001")
 
-# Headers that must not be forwarded hop-by-hop.
+# Headers that must not be forwarded hop-by-hop. accept-encoding is dropped
+# so httpx requests identity upstream and decodes any encoded response itself;
+# forwarding the browser's "gzip, br" would make httpx return still-compressed
+# bytes with the content-encoding header stripped below (garbage in browser).
 _HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+    "accept-encoding",
 }
 
 

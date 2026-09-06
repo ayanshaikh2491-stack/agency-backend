@@ -16,6 +16,13 @@ UNIFIED_API_KEY="${UNIFIED_API_KEY:-}"        # e.g. freellmapi-<48 hex>
 PROVIDER_KEYS_JSON="${PROVIDER_KEYS_JSON:-}"  # [{"platform":"groq","key":"gsk_..."}, ...]
 CUSTOM_ENDPOINTS_JSON="${CUSTOM_ENDPOINTS_JSON:-}"  # custom OpenAI-compatible providers
 
+# ── DB restore from GitHub data branch (before node boots: freeapi.db must
+# exist before the FreeLLMAPI server first-open/migrates a fresh one) ─────────
+if [ -n "$GH_BACKUP_TOKEN" ]; then
+  echo "[start] restoring DBs from backup branch"
+  python -m admin.db_backup restore || echo "[start] WARN: db restore failed (boot continues)"
+fi
+
 echo "[start] booting FreeLLMAPI on internal port $FREEAPI_PORT"
 
 # HOST=127.0.0.1 keeps the proxy loopback-only so Render detects only the
@@ -68,11 +75,26 @@ if [ -n "$UNIFIED_API_KEY" ]; then
 fi
 
 # Provider keys + custom endpoints via the REST API (needs the auth token).
+# Idempotent: fetches existing keys first and only adds platforms/endpoints
+# that are not already present (a restored DB already has them).
 if [ -n "$PROVIDER_KEYS_JSON" ] && [ -n "$seed_token" ]; then
   FREEAPI_PORT="$FREEAPI_PORT" SEED_TOKEN="$seed_token" node -e '
     const list = JSON.parse(process.env.PROVIDER_KEYS_JSON);
     (async () => {
+      let existing = new Set();
+      try {
+        const r = await fetch("http://127.0.0.1:" + process.env.FREEAPI_PORT + "/api/keys", {
+          headers: { Authorization: "Bearer " + process.env.SEED_TOKEN },
+        });
+        const body = await r.json();
+        const keys = body.keys || body || [];
+        for (const k of keys) existing.add(k.platform + ":" + (k.label || ""));
+      } catch (e) { console.log("[seed] existing-key fetch failed:", e.message); }
       for (const it of list) {
+        if (existing.has(it.platform + ":" + (it.label || ""))) {
+          console.log("[seed] key", it.platform, "-> exists (skip)");
+          continue;
+        }
         try {
           const r = await fetch("http://127.0.0.1:" + process.env.FREEAPI_PORT + "/api/keys", {
             method: "POST",
@@ -90,7 +112,20 @@ if [ -n "$CUSTOM_ENDPOINTS_JSON" ] && [ -n "$seed_token" ]; then
   FREEAPI_PORT="$FREEAPI_PORT" SEED_TOKEN="$seed_token" node -e '
     const list = JSON.parse(process.env.CUSTOM_ENDPOINTS_JSON);
     (async () => {
+      let existing = new Set();
+      try {
+        const r = await fetch("http://127.0.0.1:" + process.env.FREEAPI_PORT + "/api/keys", {
+          headers: { Authorization: "Bearer " + process.env.SEED_TOKEN },
+        });
+        const body = await r.json();
+        const keys = body.keys || body || [];
+        for (const k of keys) if (k.baseUrl) existing.add(k.baseUrl);
+      } catch (e) { console.log("[seed] existing-custom fetch failed:", e.message); }
       for (const it of list) {
+        if (existing.has(it.baseUrl)) {
+          console.log("[seed] custom", it.label || it.baseUrl, "-> exists (skip)");
+          continue;
+        }
         try {
           const r = await fetch("http://127.0.0.1:" + process.env.FREEAPI_PORT + "/api/keys/custom", {
             method: "POST",
@@ -109,8 +144,22 @@ echo "[start] starting FastAPI backend on $PORT (public)"
 python app.py &
 BACKEND_PID=$!
 
+# ── Periodic DB backup to GitHub data branch (every 20 min) ──────────────────
+if [ -n "$GH_BACKUP_TOKEN" ]; then
+  (
+    while true; do
+      sleep 1200
+      python -m admin.db_backup sync || echo "[start] WARN: periodic db sync failed"
+    done
+  ) &
+  SYNC_PID=$!
+  echo "[start] db backup loop started (every 20 min, pid=$SYNC_PID)"
+fi
+
 term() {
-  kill "$FREEAPI_PID" "$BACKEND_PID" 2>/dev/null || true
+  # Final sync so the last window of changes survives the restart.
+  [ -n "${GH_BACKUP_TOKEN:-}" ] && python -m admin.db_backup sync || true
+  kill "$FREEAPI_PID" "$BACKEND_PID" ${SYNC_PID:-} 2>/dev/null || true
   wait || true
   exit 0
 }
