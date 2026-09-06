@@ -35,7 +35,8 @@ _AGGREGATORS = ("opentable", "flexbook", "modento", "servicetitan", "schedulicit
                 # Directory/marketplace hosts that rank for local queries worldwide
                 "practo", "apollo247", "justdial", "dentee", "lybrate", "1mg.com",
                 "tripadvisor", "wikipedia.org", "wikidata", "reddit.com", "quora.com",
-                "angi.com", "homeadvisor", "thumbtack", "porch.com", "networx.com")
+                "angi.com", "homeadvisor", "thumbtack", "porch.com", "networx.com",
+                "zocdoc", "denscore", "statesman.com", "opencare", "wellness.com")
 
 # Emails whose "domain" is actually an asset filename (img-doctors@1x.jpg)
 _JUNK_EMAIL_TLDS = ("jpg", "jpeg", "png", "gif", "webp", "svg", "css", "js", "webm", "mp4")
