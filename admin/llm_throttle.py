@@ -30,6 +30,10 @@ DAILY_TOKEN_CAP = int(os.getenv("AGENCY_LLM_DAILY_TOKENS", "0"))  # 0 = off
 DAILY_USD_CAP = float(os.getenv("AGENCY_LLM_DAILY_USD", "0"))     # 0 = off
 USD_PER_1M_IN = float(os.getenv("AGENCY_LLM_USD_IN", "0"))
 USD_PER_1M_OUT = float(os.getenv("AGENCY_LLM_USD_OUT", "0"))
+# Hard wall-clock cap per LLM call. Render kills the HTTP request ~100s; a
+# hung/slow provider chain must fail FAST so callers (CEO delegation, agent
+# chat) can return a clean error instead of the edge dropping the connection.
+CALL_TIMEOUT = float(os.getenv("AGENCY_LLM_CALL_TIMEOUT_SEC", "75"))
 
 
 class BudgetExceededError(RuntimeError):
@@ -133,7 +137,17 @@ def install() -> bool:
 
     async def patched_create(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         await acquire()
-        resp = await orig_create(self, *args, **kwargs)
+        try:
+            resp = await asyncio.wait_for(
+                orig_create(self, *args, **kwargs),
+                timeout=CALL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            # Fail fast with a clear message; self-heal / CEO see this text.
+            raise TimeoutError(
+                f"LLM call exceeded {CALL_TIMEOUT:.0f}s (slow provider chain) - "
+                f"fast fail, retry next run"
+            )
         try:
             await record_usage(getattr(resp, "usage", None))
         except Exception:  # noqa: BLE001
@@ -143,7 +157,7 @@ def install() -> bool:
     def patched_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         kwargs.setdefault(
             "http_client",
-            httpx.AsyncClient(timeout=120.0),
+            httpx.AsyncClient(timeout=CALL_TIMEOUT + 5.0),
         )
         orig_init(self, *args, **kwargs)
 
