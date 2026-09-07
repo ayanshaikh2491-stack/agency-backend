@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import asyncio
 from datetime import datetime, timezone
@@ -1239,11 +1240,37 @@ async def _tool_delegate(args: dict) -> str:
         logger.warning("agent_bus brief failed for delegate %s", agent_type)
 
     try:
-        response = await route_to_agent(
-            workspace_id=ws_id,
-            agent_type=agent_type,
-            message=full_message,
-        )
+        import asyncio as _asyncio
+
+        _DELEGATE_TIMEOUT = float(os.getenv("CEO_DELEGATE_TIMEOUT_SEC", "75"))
+        try:
+            response = await _asyncio.wait_for(
+                route_to_agent(
+                    workspace_id=ws_id,
+                    agent_type=agent_type,
+                    message=full_message,
+                ),
+                timeout=_DELEGATE_TIMEOUT,
+            )
+        except _asyncio.TimeoutError:
+            # Render drops the client connection ~100s; a hung agent would
+            # kill the whole CEO reply. Return fast so the boss gets a clear
+            # status; the scheduler/self-monitor picks the work back up.
+            if message_id:
+                try:
+                    from admin.agency.agent_bus import get_bus
+
+                    get_bus().respond(
+                        message_id, result="delegation timed out (will retry)",
+                        status="error", errors=f"timeout after {_DELEGATE_TIMEOUT:.0f}s",
+                    )
+                except Exception:
+                    pass
+            return (
+                f"Delegation to {agent_type} timed out after {_DELEGATE_TIMEOUT:.0f}s "
+                f"(agent is slow / tools heavy). Task queued — self-monitor ya next "
+                f"chat mein wapas report hoga. Boss ko wait karne ki zaroorat nahi."
+            )
 
         # Built-in agents return plain strings; non-exception failures come
         # back as error-ish replies. Detect them here so the CEO heals

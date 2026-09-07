@@ -50,16 +50,42 @@ AGENT_META: dict[str, dict[str, str]] = {
 @router.get("")
 async def api_agents_list() -> dict[str, Any]:
     """List worker agents with live status (backend is the live orchestrator)."""
-    items = [
-        {
+    from admin.config import settings
+
+    # Lifecycle state → live status + current task pointer (from snapshot).
+    state_map: dict[str, dict] = {}
+    try:
+        from admin.agency.lifecycle import snapshot
+
+        for row in snapshot():
+            state_map[row["slug"]] = row
+    except Exception:  # noqa: BLE001
+        pass
+
+    provider = "freeapi-router"
+    model = settings.WORKSPACE_AGENT_MODEL or "auto"
+    items = []
+    for slug, meta in AGENT_SLUG_MAP.items():
+        lc = state_map.get(slug, {})
+        state = lc.get("state", "standby")
+        brief_id = lc.get("current_brief_id") or ""
+        last_err = (lc.get("last_error") or "")[:100]
+        task = (
+            (f"[{state.upper()}] " if state != "standby" else "")
+            + (f"brief {brief_id}" if brief_id else "idle — boss se kaam lo")
+            + (f" | last err: {last_err}" if last_err else "")
+        )
+        items.append({
             "id": slug,
             "slug": slug,
             "name": AGENT_META[slug]["name"],
             "role": AGENT_META[slug]["role"],
-            "status": "active",
-        }
-        for slug in AGENT_SLUG_MAP
-    ]
+            "status": "active" if state == "active" else ("cooldown" if state == "cooldown" else "standby"),
+            "task": task,
+            "provider": provider,
+            "model": model,
+            "api_key_ref": "WORKSPACE_API_KEY (unified freeapi)",
+        })
     return {"success": True, "agents": items, "data": {"agents": items}}
 
 
