@@ -164,6 +164,47 @@ def install() -> bool:
     AsyncCompletions.create = patched_create  # type: ignore[method-assign]
     openai.AsyncOpenAI.__init__ = patched_init
     openai.AsyncOpenAI._tags_throttled = True  # type: ignore[attr-defined]
+
+    # ── Sync-client guards (website/ads/social/... use openai.OpenAI) ─────────
+    # Those call sites block the event loop with a plain sync client; give the
+    # sync client the same short timeout AND run the call in a thread so a slow
+    # provider cannot freeze the whole server.
+    try:
+        import concurrent.futures as _cf
+
+        from openai.resources.chat.completions import Completions as SyncCompletions
+
+        orig_sync_init = openai.OpenAI.__init__
+
+        def patched_sync_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            kwargs.setdefault(
+                "http_client",
+                httpx.Client(timeout=CALL_TIMEOUT + 5.0),
+            )
+            orig_sync_init(self, *args, **kwargs)
+
+        orig_sync_create = SyncCompletions.create
+        _EXEC = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm-sync")
+
+        def patched_sync_create(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            # Sync call sites run inside async code; offload to a worker thread
+            # with the same hard timeout so the event loop never blocks > CALL_TIMEOUT.
+            fut = _EXEC.submit(orig_sync_create, self, *args, **kwargs)
+            try:
+                return fut.result(timeout=CALL_TIMEOUT)
+            except _cf.TimeoutError:
+                raise TimeoutError(
+                    f"LLM call exceeded {CALL_TIMEOUT:.0f}s (slow provider chain, sync) - "
+                    f"fast fail, retry next run"
+                )
+
+        SyncCompletions.create = patched_sync_create  # type: ignore[method-assign]
+        openai.OpenAI.__init__ = patched_sync_init
+        openai.OpenAI._tags_throttled = True  # type: ignore[attr-defined]
+        logger.info("LLM sync guards installed (timeout %.0fs, thread offload)", CALL_TIMEOUT)
+    except Exception:  # noqa: BLE001
+        logger.warning("sync LLM guards not installed", exc_info=True)
+
     logger.info(
         "LLM guards installed (RPM %d, daily cap %s tok / $%.2f)",
         RPM, DAILY_TOKEN_CAP or "off", DAILY_USD_CAP)
