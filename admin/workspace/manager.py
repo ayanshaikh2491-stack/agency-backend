@@ -607,8 +607,21 @@ async def route_to_agent(
     like a real domain human: it first gets its account brief (client
     facts, own memories, recent deliverables), then a senior-reviewer
     pass polices quality before anything reaches the CEO.
+
+    Render kills the HTTP request ~100s; a multi-call agent (reasoning
+    phases + tools + expert review) on a slow provider chain can exceed
+    that and the edge returns a blank 502. Budget the whole path:
+    draft gets up to 55s, the review pass only runs if time remains and
+    gets max 25s. On budget exhaustion the caller still gets a fast,
+    clean response instead of a dropped connection.
     """
     if os.getenv("AGENCY_EXPERT_MODE", "1") != "0":
+        import time as _time
+
+        draft_budget = float(os.getenv("AGENT_DRAFT_BUDGET_SEC", "55"))
+        review_budget = float(os.getenv("AGENT_REVIEW_BUDGET_SEC", "25"))
+
+        brief = ""
         try:
             from admin.workspace.agents.expert_mode import build_brief
 
@@ -619,13 +632,37 @@ async def route_to_agent(
                 )
         except Exception:  # noqa: BLE001
             logger.debug("expert brief unavailable", exc_info=True)
-        draft = await _route_to_agent_raw(workspace_id, agent_type, message)
+
+        t0 = _time.monotonic()
+        try:
+            draft = await asyncio.wait_for(
+                _route_to_agent_raw(workspace_id, agent_type, message),
+                timeout=draft_budget,
+            )
+        except asyncio.TimeoutError:
+            return (
+                f"[{agent_type}] agent slow tha (>{draft_budget:.0f}s budget) - "
+                f"task adhoora chhoda, agli baar ya self-monitor se retry hoga. "
+                f"Boss ko turant wait nahi karna pada."
+            )
+        elapsed = _time.monotonic() - t0
+        # Skip the review pass when the draft alone ate most of the request
+        # budget (Render kills the HTTP request ~100s).
+        total_budget = draft_budget + review_budget
+        if elapsed > total_budget - 5:
+            logger.info(
+                "expert review skipped for %s (draft took %.1fs of %.0fs budget)",
+                agent_type, elapsed, total_budget)
+            return draft
         try:
             from admin.workspace.agents.expert_mode import review
 
-            return await review(agent_type, message, draft)
-        except Exception:  # noqa: BLE001
-            logger.debug("expert review skipped", exc_info=True)
+            return await asyncio.wait_for(
+                review(agent_type, message, brief, draft),
+                timeout=review_budget,
+            )
+        except Exception:  # noqa: BLE001  (incl. review timeout)
+            logger.debug("expert review skipped (budget/error)", exc_info=True)
             return draft
     return await _route_to_agent_raw(workspace_id, agent_type, message)
 
