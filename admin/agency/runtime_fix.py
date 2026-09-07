@@ -161,17 +161,25 @@ def check_agents() -> list[dict]:
     return loop.run_until_complete(_all())
 
 
-def system_selfcheck() -> dict:
-    """Full-stack health scan. CEO runs this proactively and after any error."""
+def system_selfcheck(deep: bool = False) -> dict:
+    """Full-stack health scan. CEO runs this proactively and after any error.
+
+    Quick mode (default): imports + DB + LLM — always <30s (Render request
+    timeout safe). Deep mode also pings every workspace agent (slow, each
+    probe is a full LLM round-trip) — use only when diagnosing agents.
+    """
     report: dict = {
         "imports": check_imports(),
         "db": check_db(),
         "llm": check_llm(),
     }
-    try:
-        report["agents"] = check_agents()
-    except Exception as exc:  # noqa: BLE001
-        report["agents"] = [{"agent": "all", "ok": False, "detail": f"{type(exc).__name__}: {exc}"}]
+    if deep:
+        try:
+            report["agents"] = check_agents()
+        except Exception as exc:  # noqa: BLE001
+            report["agents"] = [{"agent": "all", "ok": False, "detail": f"{type(exc).__name__}: {exc}"}]
+    else:
+        report["agents"] = "skipped (quick mode; deep=true probes agents)"
 
     # Compact summary for the CEO's short replies.
     bad_imports = [r["module"] for r in report["imports"] if not r["ok"]]

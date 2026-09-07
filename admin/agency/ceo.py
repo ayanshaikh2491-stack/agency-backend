@@ -432,13 +432,21 @@ CEO_TOOLS = [
         "function": {
             "name": "system_selfcheck",
             "description": (
-                "Full system health scan WITHOUT bothering the boss: verifies every "
-                "critical import/module, DB connectivity, LLM (freeapi) reachability, "
-                "and pings each workspace agent. Run this proactively at session "
-                "start, after any deploy, or whenever ANY agent errors out — then "
-                "fix what it finds (fix via heal_agent / route_error_fix) yourself."
+                "Quick system health scan (imports + DB + LLM, <30s): run this "
+                "proactively at session start, after any deploy, or whenever "
+                "ANY agent errors out — then fix what you find (heal_agent / "
+                "route_error_fix) yourself. Set deep=true ONLY when diagnosing "
+                "agents specifically (pings each agent, slow)."
             ),
-            "parameters": {"type": "object", "properties": {}},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "deep": {
+                        "type": "boolean",
+                        "description": "Also ping every workspace agent (slow, full LLM round-trips). Default false.",
+                    },
+                },
+            },
         },
     },
     {
@@ -908,7 +916,7 @@ async def _execute_ceo_tool(name: str, args: dict) -> str:
         return await _tool_route_error(args)
 
     elif name == "system_selfcheck":
-        return _tool_system_selfcheck()
+        return _tool_system_selfcheck(args)
 
     elif name == "heal_agent":
         return await _tool_heal_agent(args)
@@ -1789,14 +1797,14 @@ async def _tool_heal_agent(args: dict) -> str:
     )
 
 
-def _tool_system_selfcheck() -> str:
-    """CEO doctor: scan imports, DB, LLM, agents — return boss-readable report."""
+def _tool_system_selfcheck(args: dict) -> str:
+    """CEO doctor: scan imports, DB, LLM (+agents if deep) — boss-readable report."""
     import json as _json
 
     from admin.agency.runtime_fix import system_selfcheck
 
     try:
-        report = system_selfcheck()
+        report = system_selfcheck(deep=bool(args.get("deep", False)))
     except Exception as exc:  # noqa: BLE001
         return f"SELFCHECK CRASHED: {type(exc).__name__}: {exc}"
 
