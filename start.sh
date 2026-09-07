@@ -144,6 +144,38 @@ echo "[start] starting FastAPI backend on $PORT (public)"
 python app.py &
 BACKEND_PID=$!
 
+# ── Seed CEO autonomous schedules (idempotent; after backend is up) ──────────
+# The scheduler stores schedules on ephemeral disk, so every redeploy would
+# otherwise start with ZERO autonomous runs. Wait for /api/health, then
+# POST the 3 baseline schedules only if the slug doesn't exist yet.
+(
+  for i in $(seq 1 60); do
+    curl -fsS "http://127.0.0.1:$PORT/api/health" > /dev/null 2>&1 && break
+    sleep 2
+  done
+  SEEDS='[{"slug":"morning-brief","task":"Morning brief banao: kitne leads hain (list_saved_leads), pending reviews/handoffs, agents ka status, aur aaj ka TOP priority suggest karo. Short report.","interval_minutes":1440,"workspace_id":"","enabled":true},{"slug":"lead-pipeline","task":"SBA ko bolo naye leads dhundhe (find_leads_http tool, dentist/hvac/salon categories, Austin + Dallas TX). Har naye lead ko qualify + save karo. Sirf 3-5 leads per run, short report.","interval_minutes":360,"workspace_id":"","enabled":true},{"slug":"self-monitor","task":"system_selfcheck quick mode chalao. Koi issue ho to heal_agent se fix karo. 2 line report.","interval_minutes":60,"workspace_id":"","enabled":true}]'
+  echo "$SEEDS" | python -c '
+import json, sys, urllib.request
+seeds = json.load(sys.stdin)
+for s in seeds:
+    try:
+        req = urllib.request.Request("http://127.0.0.1:" + __import__("os").environ.get("PORT", "7860") + "/api/ceo/schedules")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            existing = {x.get("slug") for x in json.loads(r.read()).get("schedules", [])}
+        if s["slug"] in existing:
+            print("[sched-seed]", s["slug"], "exists (skip)")
+            continue
+        req2 = urllib.request.Request(
+            "http://127.0.0.1:" + __import__("os").environ.get("PORT", "7860") + "/api/ceo/schedules",
+            data=json.dumps(s).encode(), headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req2, timeout=60) as r2:
+            print("[sched-seed]", s["slug"], "->", r2.status)
+    except Exception as e:
+        print("[sched-seed]", s.get("slug"), "failed:", e)
+'
+) &
+echo "[start] CEO schedule seed started (background)"
+
 # ── Periodic DB backup to GitHub data branch (every 20 min) ──────────────────
 if [ -n "$GH_BACKUP_TOKEN" ]; then
   (
