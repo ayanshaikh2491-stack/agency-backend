@@ -247,7 +247,8 @@ class SBAAgentState(TypedDict):
     tool_round: int
     final_output: str
     error: str | None
-    runtime: Any  # Per-agent real-tool runtime (E2B + Composio + policy)
+    # runtime deliberately NOT in state: checkpointer msgpack-serializes it
+    # and AgentRuntime is not serializable (crashed every ainvoke).
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -697,13 +698,13 @@ async def sba_run_tools(state: SBAAgentState) -> dict[str, Any]:
             try:
                 from admin.runtime.spend_policy import RiskLevel
 
-                # Runtime is threaded into the graph state by SBAAgent.chat()
-                # (key "runtime"); fall back to a fresh per-workspace runtime if
-                # absent. Both paths are always safe (local fallback + gated).
-                rt = state.get("runtime")
-                if rt is None:
-                    from admin.runtime import get_agent_runtime
-                    rt = get_agent_runtime("sba", workspace_id)
+                # Runtime is no longer threaded through graph state (state is
+                # persisted by the checkpointer and AgentRuntime is not
+                # serializable). Always build/get the per-workspace runtime
+                # here — safe fallback (local sandbox + gated integrations).
+                from admin.runtime import get_agent_runtime
+
+                rt = get_agent_runtime("sba", workspace_id)
 
                 if tool_name == "run_sandbox_code":
                     dec = rt.policy.evaluate("run_sandbox_code", RiskLevel.LOW)
@@ -1043,7 +1044,10 @@ class SBAAgent:
             "tool_round": 0,
             "final_output": "",
             "error": None,
-            "runtime": self.runtime,  # real-tool runtime for run_tools dispatch
+            # NOTE: runtime is NOT stored in state anymore — the DB
+            # checkpointer msgpack-serializes state and AgentRuntime is not
+            # serializable (TypeError crash on every ainvoke). run_tools now
+            # builds/falls back to a per-workspace runtime on demand.
         }
 
         try:
