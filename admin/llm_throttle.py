@@ -30,10 +30,12 @@ DAILY_TOKEN_CAP = int(os.getenv("AGENCY_LLM_DAILY_TOKENS", "0"))  # 0 = off
 DAILY_USD_CAP = float(os.getenv("AGENCY_LLM_DAILY_USD", "0"))     # 0 = off
 USD_PER_1M_IN = float(os.getenv("AGENCY_LLM_USD_IN", "0"))
 USD_PER_1M_OUT = float(os.getenv("AGENCY_LLM_USD_OUT", "0"))
-# Hard wall-clock cap per LLM call. Render kills the HTTP request ~100s; a
-# hung/slow provider chain must fail FAST so callers (CEO delegation, agent
-# chat) can return a clean error instead of the edge dropping the connection.
-CALL_TIMEOUT = float(os.getenv("AGENCY_LLM_CALL_TIMEOUT_SEC", "75"))
+# Hard wall-clock cap per LLM call. Render's edge kills the HTTP request at
+# ~60s (observed 502 at 62s), so every LLM call — sync or async — must
+# unblock WELL before that. Sync calls block the event loop, so the cap is
+# enforced via the httpx client timeout + zero SDK retries (each retry would
+# restart the clock and stack past the edge limit).
+CALL_TIMEOUT = float(os.getenv("AGENCY_LLM_CALL_TIMEOUT_SEC", "35"))
 
 
 class BudgetExceededError(RuntimeError):
@@ -159,6 +161,7 @@ def install() -> bool:
             "http_client",
             httpx.AsyncClient(timeout=CALL_TIMEOUT + 5.0),
         )
+        kwargs.setdefault("max_retries", 0)
         orig_init(self, *args, **kwargs)
 
     AsyncCompletions.create = patched_create  # type: ignore[method-assign]
@@ -166,12 +169,12 @@ def install() -> bool:
     openai.AsyncOpenAI._tags_throttled = True  # type: ignore[attr-defined]
 
     # ── Sync-client guards (website/ads/social/... use openai.OpenAI) ─────────
-    # Those call sites block the event loop with a plain sync client; give the
-    # sync client the same short timeout AND run the call in a thread so a slow
-    # provider cannot freeze the whole server.
+    # Sync calls BLOCK the event loop: a hung provider freezes every other
+    # request too. The httpx Client timeout is the real enforcement here
+    # (the executor+result() approach also blocks the loop, so it was wrong).
+    # SDK retries are forced to 0 so the SDK cannot stack retries past the
+    # edge limit; self-heal / CEO retries at the business layer instead.
     try:
-        import concurrent.futures as _cf
-
         from openai.resources.chat.completions import Completions as SyncCompletions
 
         orig_sync_init = openai.OpenAI.__init__
@@ -179,29 +182,19 @@ def install() -> bool:
         def patched_sync_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
             kwargs.setdefault(
                 "http_client",
-                httpx.Client(timeout=CALL_TIMEOUT + 5.0),
+                httpx.Client(
+                    timeout=httpx.Timeout(
+                        CALL_TIMEOUT + 5.0,
+                        connect=10.0,
+                    ),
+                ),
             )
+            kwargs.setdefault("max_retries", 0)
             orig_sync_init(self, *args, **kwargs)
 
-        orig_sync_create = SyncCompletions.create
-        _EXEC = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm-sync")
-
-        def patched_sync_create(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-            # Sync call sites run inside async code; offload to a worker thread
-            # with the same hard timeout so the event loop never blocks > CALL_TIMEOUT.
-            fut = _EXEC.submit(orig_sync_create, self, *args, **kwargs)
-            try:
-                return fut.result(timeout=CALL_TIMEOUT)
-            except _cf.TimeoutError:
-                raise TimeoutError(
-                    f"LLM call exceeded {CALL_TIMEOUT:.0f}s (slow provider chain, sync) - "
-                    f"fast fail, retry next run"
-                )
-
-        SyncCompletions.create = patched_sync_create  # type: ignore[method-assign]
         openai.OpenAI.__init__ = patched_sync_init
         openai.OpenAI._tags_throttled = True  # type: ignore[attr-defined]
-        logger.info("LLM sync guards installed (timeout %.0fs, thread offload)", CALL_TIMEOUT)
+        logger.info("LLM sync guards installed (timeout %.0fs, no SDK retries)", CALL_TIMEOUT)
     except Exception:  # noqa: BLE001
         logger.warning("sync LLM guards not installed", exc_info=True)
 

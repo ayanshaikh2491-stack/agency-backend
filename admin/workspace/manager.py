@@ -618,8 +618,9 @@ async def route_to_agent(
     if os.getenv("AGENCY_EXPERT_MODE", "1") != "0":
         import time as _time
 
-        draft_budget = float(os.getenv("AGENT_DRAFT_BUDGET_SEC", "55"))
-        review_budget = float(os.getenv("AGENT_REVIEW_BUDGET_SEC", "25"))
+        # Render's edge kills the request ~60s; draft+review must fit inside.
+        draft_budget = float(os.getenv("AGENT_DRAFT_BUDGET_SEC", "40"))
+        review_budget = float(os.getenv("AGENT_REVIEW_BUDGET_SEC", "15"))
 
         brief = ""
         try:

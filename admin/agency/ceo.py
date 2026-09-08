@@ -1242,7 +1242,7 @@ async def _tool_delegate(args: dict) -> str:
     try:
         import asyncio as _asyncio
 
-        _DELEGATE_TIMEOUT = float(os.getenv("CEO_DELEGATE_TIMEOUT_SEC", "75"))
+        _DELEGATE_TIMEOUT = float(os.getenv("CEO_DELEGATE_TIMEOUT_SEC", "50"))
         try:
             response = await _asyncio.wait_for(
                 route_to_agent(
