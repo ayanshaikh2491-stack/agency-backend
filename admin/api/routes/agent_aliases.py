@@ -25,6 +25,7 @@ router = APIRouter(prefix="/api/agents", tags=["agents"])
 # Frontend worker slugs -> workspace agent_type (admin/workspace/manager.py).
 # Only agents with a real production implementation are registered here.
 AGENT_SLUG_MAP: dict[str, str] = {
+    "sba": "sba",
     "content-creator": "content",
     "seo-engine": "seo",
     "website-builder": "website",
@@ -36,6 +37,7 @@ AGENT_SLUG_MAP: dict[str, str] = {
 }
 
 AGENT_META: dict[str, dict[str, str]] = {
+    "sba": {"name": "SBA Agent", "role": "sba"},
     "content-creator": {"name": "Content Creator", "role": "content"},
     "seo-engine": {"name": "SEO Engine", "role": "seo"},
     "website-builder": {"name": "Website Agent", "role": "website"},
@@ -128,6 +130,57 @@ async def _resolve_workspace(client_name: str, workspace_id: str | None) -> tupl
         )
     )
     return created, created.id
+
+
+@router.get("/{agent_id}/memories")
+async def api_agent_memories(agent_id: str, limit: int = 20) -> dict[str, Any]:
+    """Recent agent outputs as 'memories' — real work the agent produced
+    (the frontend Memory panel previously showed Not Found because no
+    such route existed)."""
+    if agent_id not in AGENT_SLUG_MAP:
+        raise HTTPException(404, f"Unknown agent: {agent_id}")
+    agent_type = AGENT_SLUG_MAP[agent_id]
+    from admin.workspace.manager import get_agent_activity_log
+
+    # Agent outputs are logged in the activity log; surface the recent
+    # task/output rows for this agent as memory entries.
+    try:
+        rows = get_agent_activity_log("agency", agent_type, limit=limit * 2)
+    except Exception:  # noqa: BLE001
+        rows = []
+    memories = [
+        {
+            "id": r.get("id", ""),
+            "text": (r.get("details") or r.get("action") or "")[:200],
+            "content": (r.get("details") or "")[:200],
+            "type": "activity",
+            "created_at": r.get("timestamp") or r.get("created_at"),
+        }
+        for r in rows
+    ][:limit]
+    return {"success": True, "memories": memories, "data": memories}
+
+
+@router.get("/{agent_id}/conversations")
+async def api_agent_conversations(agent_id: str, limit: int = 10) -> dict[str, Any]:
+    """Recent agent outputs (task + output) as conversation history."""
+    if agent_id not in AGENT_SLUG_MAP:
+        raise HTTPException(404, f"Unknown agent: {agent_id}")
+    agent_type = AGENT_SLUG_MAP[agent_id]
+    from admin.workspace.manager import _agent_outputs
+
+    convs = [
+        {
+            "id": o.get("id", ""),
+            "task": (o.get("task") or "")[:120],
+            "summary": (o.get("output_preview") or "")[:200],
+            "agent_type": o.get("agent_type", ""),
+            "timestamp": o.get("timestamp"),
+        }
+        for o in reversed(_agent_outputs)
+        if o.get("agent_type") == agent_type
+    ][:limit]
+    return {"success": True, "conversations": convs, "data": convs}
 
 
 @router.post("/{agent_id}/chat")
