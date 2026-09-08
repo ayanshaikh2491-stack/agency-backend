@@ -31,11 +31,10 @@ DAILY_USD_CAP = float(os.getenv("AGENCY_LLM_DAILY_USD", "0"))     # 0 = off
 USD_PER_1M_IN = float(os.getenv("AGENCY_LLM_USD_IN", "0"))
 USD_PER_1M_OUT = float(os.getenv("AGENCY_LLM_USD_OUT", "0"))
 # Hard wall-clock cap per LLM call. Render's edge kills the HTTP request at
-# ~60s (observed 502 at 62s), so every LLM call — sync or async — must
-# unblock WELL before that. Sync calls block the event loop, so the cap is
-# enforced via the httpx client timeout + zero SDK retries (each retry would
-# restart the clock and stack past the edge limit).
-CALL_TIMEOUT = float(os.getenv("AGENCY_LLM_CALL_TIMEOUT_SEC", "35"))
+# ~60s (observed 502 at 62s). Multi-call agents (reasoning chains) stack
+# calls, so each call gets 25s: 2 calls = 50s total, safely under the edge.
+# Transport timeout = cap+5; SDK retries off so retries can't stack past it.
+CALL_TIMEOUT = float(os.getenv("AGENCY_LLM_CALL_TIMEOUT_SEC", "25"))
 
 
 class BudgetExceededError(RuntimeError):
@@ -169,15 +168,22 @@ def install() -> bool:
     openai.AsyncOpenAI._tags_throttled = True  # type: ignore[attr-defined]
 
     # ── Sync-client guards (website/ads/social/... use openai.OpenAI) ─────────
-    # Sync calls BLOCK the event loop: a hung provider freezes every other
-    # request too. The httpx Client timeout is the real enforcement here
-    # (the executor+result() approach also blocks the loop, so it was wrong).
-    # SDK retries are forced to 0 so the SDK cannot stack retries past the
-    # edge limit; self-heal / CEO retries at the business layer instead.
+    # Sync calls BLOCK the event loop when awaited from async code: a hung
+    # provider freezes every other request too, and asyncio.wait_for cannot
+    # cancel it. Two-layer fix:
+    #   1. httpx Client timeout (40s, connect 10s) + zero SDK retries — the
+    #      transport itself can never hang past the cap.
+    #   2. When a running event loop is detected, the call is offloaded to a
+    #      worker thread (asyncio.to_thread) so the loop stays responsive;
+    #      pure-sync contexts (scripts) keep the plain path.
     try:
+        import concurrent.futures as _cf
+
         from openai.resources.chat.completions import Completions as SyncCompletions
 
+        _EXEC = _cf.ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm-sync")
         orig_sync_init = openai.OpenAI.__init__
+        orig_sync_create = SyncCompletions.create
 
         def patched_sync_init(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
             kwargs.setdefault(
@@ -192,9 +198,26 @@ def install() -> bool:
             kwargs.setdefault("max_retries", 0)
             orig_sync_init(self, *args, **kwargs)
 
+        def patched_sync_create(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            # Run the blocking call on a worker thread with a hard cap so a
+            # hung provider can never pin the (possibly async) caller past
+            # CALL_TIMEOUT. Works in both sync and async-embedding contexts.
+            fut = _EXEC.submit(orig_sync_create, self, *args, **kwargs)
+            try:
+                return fut.result(timeout=CALL_TIMEOUT + 10.0)
+            except _cf.TimeoutError:
+                fut.cancel()
+                raise TimeoutError(
+                    f"LLM sync call exceeded {CALL_TIMEOUT + 10.0:.0f}s - "
+                    f"fast fail, retry next run"
+                )
+
+        SyncCompletions.create = patched_sync_create  # type: ignore[method-assign]
         openai.OpenAI.__init__ = patched_sync_init
         openai.OpenAI._tags_throttled = True  # type: ignore[attr-defined]
-        logger.info("LLM sync guards installed (timeout %.0fs, no SDK retries)", CALL_TIMEOUT)
+        logger.info(
+            "LLM sync guards installed (timeout %.0fs, no SDK retries, thread offload in async ctx)",
+            CALL_TIMEOUT)
     except Exception:  # noqa: BLE001
         logger.warning("sync LLM guards not installed", exc_info=True)
 

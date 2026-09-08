@@ -153,7 +153,7 @@ BACKEND_PID=$!
     curl -fsS "http://127.0.0.1:$PORT/api/health" > /dev/null 2>&1 && break
     sleep 2
   done
-  SEEDS='[{"slug":"morning-brief","task":"Morning brief banao: kitne leads hain (list_saved_leads), pending reviews/handoffs, agents ka status, aur aaj ka TOP priority suggest karo. Short report.","interval_minutes":1440,"workspace_id":"","enabled":true},{"slug":"lead-pipeline","task":"SBA ko bolo naye leads dhundhe (find_leads_http tool, dentist/hvac/salon categories, Austin + Dallas TX). Har naye lead ko qualify + save karo. Sirf 3-5 leads per run, short report.","interval_minutes":360,"workspace_id":"","enabled":true},{"slug":"self-monitor","task":"system_selfcheck quick mode chalao. Koi issue ho to heal_agent se fix karo. 2 line report.","interval_minutes":60,"workspace_id":"","enabled":true}]'
+  SEEDS='[{"slug":"morning-brief","task":"Morning brief banao: kitne leads hain (list_saved_leads), pending reviews/handoffs, agents ka status, aur aaj ka TOP priority suggest karo. Short report.","interval_minutes":1440,"workspace_id":"","enabled":true},{"slug":"lead-pipeline","task":"start_agent_task se SBA ko background mein bolo: naye leads dhundo (find_leads_http tool, dentist/hvac/salon categories, Austin + Dallas TX), har naye lead ko qualify + save karo (3-5 leads). Task start hone ke baad turant 2-line confirmation de — result next run ya check_task se report hoga.","interval_minutes":360,"workspace_id":"","enabled":true},{"slug":"self-monitor","task":"system_selfcheck quick mode chalao. Koi issue ho to heal_agent se fix karo. 2 line report.","interval_minutes":60,"workspace_id":"","enabled":true}]'
   echo "$SEEDS" | python -c '
 import json, sys, urllib.request
 seeds = json.load(sys.stdin)

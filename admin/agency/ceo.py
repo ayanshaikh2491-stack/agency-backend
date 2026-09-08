@@ -99,7 +99,9 @@ Your final response — the actual message to the agency owner.
 Clear, direct, actionable. No fluff.
 
 ## Available tools
-- **delegate_to_workspace**: Send a task to a specific workspace agent
+- **start_agent_task**: REAL WORK ke liye YEH use karo — background task start, turant task_id milti hai, agent aaram se kaam karta hai (2 min bhi chale). Lead-gen, research, content, analysis — sab long kaam isse.
+- **check_task**: background task ka status/result uthao (task_id se poll karo)
+- **delegate_to_workspace**: sirf CHHOTE quick tasks (< 30s) ke liye — jaise status puchna. Long kaam isse mat karo (60s wall pe mar jata hai).
 - **delegate_parallel_blast**: Brief ALL agents in a workspace simultaneously (Q4)
 - **list_workspaces**: See all workspaces and their status
 - **get_workspace_report**: Detailed report for a specific workspace
@@ -114,6 +116,14 @@ Clear, direct, actionable. No fluff.
 - **create_store_client_account**: Create the client's store login (email/password)
 - **list_store_products**: See what products the client added to their store
 - **publish_client_store**: Rebuild + deploy the client's live site from their store
+
+## DELEGATION RULE (24/7 CEO behavior — sabse important)
+Jab bhi koi agent se kaam karwana ho (leads, content, SEO, research, analysis):
+1. **start_agent_task** se bhejo — TURANT task_id aati hai, boss ko "kaam shuru" bolo.
+2. Reply mein batao: kaunsa agent, kya kaam, task_id.
+3. Boss agli baar aaye ya schedule chale, **check_task** se result padho aur report do.
+4. Kabhi bhi ek hi reply mein kaam ka INTezaar mat karo — start bolo, result baad mein.
+Yahi 24/7 agency ka pattern hai: task start hoti hai, background mein chalti hai, result agent_outputs mein save hota hai, CEO report deta hai.
 
 ## SELF-REPAIR PROTOCOL (critical — boss ko bother mat karo)
 Jab BHI koi agent error kare (ModuleNotFoundError, tool crash, 429, timeout, DB fail):
@@ -178,6 +188,50 @@ When a client asks about their website/store, or you need to hand the client the
 # ── Tools definition for CEO ─────────────────────────────────────────────────
 
 CEO_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "start_agent_task",
+            "description": (
+                "Start a LONG agent task in the background and return instantly "
+                "(task_id). Use this for any real work (leads, research, content, "
+                "analysis) instead of delegate_to_workspace when the work may take "
+                "over ~30 seconds. Boss ko turant 'task shuru' ka jawab de, result "
+                "baad mein check_task se utha."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "description": "Workspace ID"},
+                    "agent_type": {
+                        "type": "string",
+                        "enum": ["sba", "seo", "content", "website", "analytics", "ads", "social"],
+                        "description": "Agent to run the task",
+                    },
+                    "task": {"type": "string", "description": "Clear task brief"},
+                },
+                "required": ["workspace_id", "agent_type", "task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_task",
+            "description": (
+                "Check status/result of a background task started via "
+                "start_agent_task. Returns status (queued/running/done/error) "
+                "and the result text when finished. Poll every ~30s while running."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task ID from start_agent_task"},
+                },
+                "required": ["task_id"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -895,6 +949,12 @@ async def _execute_ceo_tool(name: str, args: dict) -> str:
     if name == "list_workspaces":
         return _tool_list_workspaces()
 
+    elif name == "start_agent_task":
+        return await _tool_start_agent_task(args)
+
+    elif name == "check_task":
+        return _tool_check_task(args)
+
     elif name == "get_workspace_report":
         return _tool_workspace_report(args.get("workspace_id", ""))
 
@@ -1158,6 +1218,56 @@ async def _tool_email_client(args: dict) -> str:
         logger.exception("CEO email_client failed")
         return f"Bhai, email queue fail ho gaya {to_email} ke liye: {exc}"
 
+
+async def _tool_start_agent_task(args: dict) -> str:
+    """Start a background agent task; instant task_id reply (no 60s wall)."""
+    ws_id = args.get("workspace_id", "") or "ws_agency"
+    agent_type = args.get("agent_type", "sba")
+    task = (args.get("task") or "").strip()
+    if not task:
+        return "Task text required."
+    try:
+        from admin.agency.task_runner import start_task
+
+        task_id = await start_task(agent_type, ws_id, task, source="ceo")
+        if task_id == "BUSY":
+            return (
+                f"Pehle se {agent_type} ke 3 background tasks chal rahe hain "
+                f"(RAM guard). Thoda ruk ke dobara start karo, ya check_task "
+                f"se purane results pehle utha lo."
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("start_agent_task failed")
+        return f"Background task start nahi hua: {exc}"
+    return (
+        f"Task START ho gaya (id: {task_id}). {agent_type} background mein "
+        f"kaam kar raha hai - is request mein block nahi hua. Boss ko bol: "
+        f"'{task[:80]}' chal raha hai. ~1-2 min mein check_task('{task_id}') "
+        f"se result utha, ya agli baar chat mein status bata."
+    )
+
+
+def _tool_check_task(args: dict) -> str:
+    """Poll a background task's status/result."""
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        return "task_id required."
+    try:
+        from admin.agency.task_runner import get_task
+
+        st = get_task(task_id)
+    except Exception as exc:  # noqa: BLE001
+        return f"check_task failed: {exc}"
+    if not st:
+        return f"Task '{task_id}' nahi mila (server restart hua hoga - result agent_outputs store mein audit ke liye bacha hai)."
+    if st["status"] == "running" or st["status"] == "queued":
+        return (
+            f"Task {task_id} abhi {st['status']} hai "
+            f"({st.get('elapsed_sec') or 0}s tak). Thodi der baad dobara check karo."
+        )
+    if st["status"] == "error":
+        return f"Task {task_id} FAIL: {st['error'][:300]}"
+    return f"Task {task_id} DONE ({st.get('elapsed_sec')}s):\n{st['result'][:1200]}"
 
 
 async def _tool_delegate(args: dict) -> str:

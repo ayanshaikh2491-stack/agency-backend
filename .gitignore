@@ -10,3 +10,5 @@ pb_data/
 
 *.db-shm
 *.db-wal
+
+codegraph.json

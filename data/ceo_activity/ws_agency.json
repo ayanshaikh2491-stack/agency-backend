@@ -1,0 +1,34 @@
+{
+  "entries": [
+    {
+      "timestamp": "2026-09-08T16:17:48.280356+00:00",
+      "agent_type": "seo",
+      "action": "bg_task_done",
+      "details": "[becf1397fede] test task",
+      "metadata": {
+        "task_id": "becf1397fede",
+        "elapsed": 11.3
+      }
+    },
+    {
+      "timestamp": "2026-09-08T16:18:31.386183+00:00",
+      "agent_type": "seo",
+      "action": "bg_task_done",
+      "details": "[04a4a1c94497] test task",
+      "metadata": {
+        "task_id": "04a4a1c94497",
+        "elapsed": 0.7
+      }
+    },
+    {
+      "timestamp": "2026-09-08T16:20:36.833357+00:00",
+      "agent_type": "seo",
+      "action": "bg_task_done",
+      "details": "[7895565488fd] test task",
+      "metadata": {
+        "task_id": "7895565488fd",
+        "elapsed": 0.3
+      }
+    }
+  ]
+}

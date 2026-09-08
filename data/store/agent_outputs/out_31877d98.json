@@ -1,0 +1,10 @@
+{
+  "id": "out_31877d98",
+  "workspace_id": "ws_agency",
+  "agent_type": "seo",
+  "task": "test task",
+  "output": "Workspace 'ws_agency' not found.",
+  "output_preview": "Workspace 'ws_agency' not found.",
+  "timestamp": "2026-09-08T16:18:30.805377+00:00",
+  "reviewed": false
+}
