@@ -36,12 +36,23 @@ def _env(key: str, default: str = "") -> str:
 
 
 def supabase_config() -> tuple[str, str] | None:
-    """Gateway config: PocketBase first, Supabase names as legacy fallback."""
+    """Gateway config: PocketBase first, Supabase names as legacy fallback.
+
+    NOTE (2026-09-09): leads now live in the LOCAL store (sba_store/SQLite),
+    and `load_leads` reads from there — PocketBase is only an optional mirror.
+    Returning None here used to hard-disable the ENTIRE autopilot on Render
+    (POCKETBASE_SERVICE_KEY was never set), so the pipeline silently ran with
+    all-zero stats for months. Now: no key -> placeholder credentials, and
+    only actual remote reads fail (caught) while local reads keep working.
+    """
     url = _env("POCKETBASE_URL", _env("SUPABASE_URL", "http://localhost:8050"))
     key = _env("POCKETBASE_SERVICE_KEY", _env("SUPABASE_SERVICE_KEY", ""))
     if not key:
-        logger.warning("POCKETBASE_SERVICE_KEY missing — pipeline disabled")
-        return None
+        logger.warning(
+            "POCKETBASE_SERVICE_KEY missing — continuing with local-only mode "
+            "(leads read/write via sba_store; remote mirror disabled)"
+        )
+        key = "local-only"
     return url, key
 
 
