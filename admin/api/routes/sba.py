@@ -74,6 +74,8 @@ class LeadUpdate(BaseModel):
     business_name: str | None = None
     email: str | None = None
     phone: str | None = None
+    city: str | None = None
+    state: str | None = None
     score: int | None = None
     status: str | None = None
     notes: list | None = None
