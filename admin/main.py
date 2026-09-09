@@ -111,6 +111,17 @@ async def lifespan(app: FastAPI):
     for slug in ("ceo", "sba", "seo", "social", "website"):
         lc.register(slug)
 
+    # ── Worker registry (CRITICAL: without this, every run_worker call
+    # returns "unknown worker" — register_builtins was never wired at boot,
+    # so CEO delegation and /api/ceo/run fan-outs silently failed) ──────────
+    try:
+        from admin.agency.workers import register_builtins
+
+        await register_builtins()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("admin.main").warning(
+            "worker registration failed (non-fatal): %s", exc)
+
     # ── Mandate table (best-effort; self-guards on first use) ───────────────
     try:
         from admin.agency import mandates as mandates_mod
