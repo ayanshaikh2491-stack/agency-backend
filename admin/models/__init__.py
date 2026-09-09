@@ -22,6 +22,9 @@ class LeadModel(Base):
     business_name: Mapped[str] = mapped_column(String(255), default="")
     email: Mapped[str] = mapped_column(String(255), default="")
     phone: Mapped[str] = mapped_column(String(64), default="")
+    city: Mapped[str] = mapped_column(String(128), default="")
+    state: Mapped[str] = mapped_column(String(64), default="")
+    website: Mapped[str] = mapped_column(String(512), default="")
     source: Mapped[str] = mapped_column(String(64), default="manual")
     score: Mapped[int] = mapped_column(Integer, default=50)
     status: Mapped[str] = mapped_column(String(32), default="new")
@@ -38,6 +41,9 @@ class LeadModel(Base):
             "business_name": self.business_name,
             "email": self.email,
             "phone": self.phone,
+            "city": self.city or "",
+            "state": self.state or "",
+            "website": self.website or "",
             "source": self.source,
             "score": self.score,
             "status": self.status,

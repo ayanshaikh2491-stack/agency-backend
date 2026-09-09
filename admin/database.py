@@ -9,6 +9,7 @@ from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+import sqlalchemy
 
 from admin.config import settings
 
@@ -73,6 +74,40 @@ async def init_db() -> None:
         logger.info("Database tables created / verified")
     except Exception as exc:
         logger.error("init_db() failed: %s", exc)
+    # ── Lightweight column migration ────────────────────────────────────────
+    # create_all only creates MISSING TABLES — existing tables never gain new
+    # columns. Add columns added after initial deploy here (idempotent).
+    try:
+        _COLS = {
+            "leads": [
+                ("city", "VARCHAR(128) DEFAULT ''"),
+                ("state", "VARCHAR(64) DEFAULT ''"),
+                ("website", "VARCHAR(512) DEFAULT ''"),
+            ],
+        }
+        async with engine.begin() as conn:
+            for table, cols in _COLS.items():
+                existing = set()
+                try:
+                    result = await conn.execute(
+                        sqlalchemy.text(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'")  # noqa: E501
+                    )
+                    existing = {r[0] for r in result}
+                except Exception:  # noqa: BLE001
+                    # SQLite path
+                    try:
+                        result = await conn.execute(sqlalchemy.text(f"PRAGMA table_info({table})"))
+                        existing = {r[1] for r in result}
+                    except Exception:  # noqa: BLE001
+                        continue
+                for col, decl in cols:
+                    if col not in existing:
+                        await conn.execute(
+                            sqlalchemy.text(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                        )
+                        logger.info("migrated: %s.%s added", table, col)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("column migration skipped: %s", exc)
 
 
 async def close_db() -> None:
