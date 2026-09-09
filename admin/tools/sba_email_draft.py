@@ -80,6 +80,14 @@ async def _llm_draft(lead: dict, skill_context: str, angle: str | None = None) -
         "local SEO agency. Write ONE professional, personalized cold email to a "
         "local business. Keep it short (under 120 words), friendly, specific, "
         "and end with a soft CTA for a 15-minute call.\n\n"
+        "HARD RULES (violating any = the email is rejected):\n"
+        "1. NO fabricated claims or numbers. TAGS is a new, small agency - never "
+        "invent client counts, percentages, awards, or testimonials ('50+ clients', "
+        "'40% increase', etc. are all forbidden). If you reference results, keep "
+        "them hypothetical ('more calls from Google') not fake-cited.\n"
+        "2. The email must open with a hook SPECIFIC to this one business - its "
+        "category, city, or website - not a generic 'I noticed' template.\n"
+        "3. Sign as Ayan, TAGS Agency. Never use a placeholder like [Your Name].\n\n"
         f"RELEVANT SKILLS:\n{skill_context}"
     )
     if angle:
@@ -87,6 +95,9 @@ async def _llm_draft(lead: dict, skill_context: str, angle: str | None = None) -
         system += f"\n\nCURRENT MESSAGE ANGLE (weave this in naturally, do not quote it):\n{angle}"
     user = (
         f"Lead: {name} ({category}) in {city_state}. "
+        f"Website: {lead.get('website') or 'none found'}. "
+        "Use one real, checkable detail about THIS business as the hook "
+        "(its category, city, or website - never a made-up statistic). "
         "Return JSON: {\"subject\": \"...\", \"body\": \"...\"}. Body plain text only."
     )
     resp = await client.chat.completions.create(
@@ -126,11 +137,17 @@ async def _llm_followup(lead: dict, skill_context: str, touch_index: int = 0,
         "business that did not reply to our earlier email(s). Keep it under 90 words, "
         "friendly, never pushy, give a low-friction out (no reply needed), and end "
         f"with a soft CTA for a 15-minute call. This is the {touch_label} "
-        "(later touches may be slightly more direct but must stay respectful)."
+        "(later touches may be slightly more direct but must stay respectful).\n"
+        "HARD RULES: no fabricated claims or numbers (TAGS is new - no fake client "
+        "counts, stats, or testimonials), keep it specific to this business, "
+        "sign as Ayan, TAGS Agency (no placeholders like [Your Name])."
         f"\n\nRELEVANT SKILLS:\n{skill_context}"
     )
     user = (
         f"Lead: {name} ({category}) in {city_state}. "
+        f"Website: {lead.get('website') or 'none found'}. "
+        "Use one real, checkable detail about THIS business as the hook "
+        "(its category, city, or website - never a made-up statistic). "
         "Return JSON: {\"subject\": \"...\", \"body\": \"...\"}. Body plain text only."
     )
     resp = await client.chat.completions.create(
