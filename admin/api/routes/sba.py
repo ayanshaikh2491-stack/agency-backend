@@ -319,6 +319,51 @@ async def api_list_sba_skills():
     return {"success": True, "data": {"skills": list_sba_skills()}}
 
 
+# ── Outreach draft preview (boss review gate) ────────────────────────────────
+
+
+@router.get("/outreach/preview")
+async def api_outreach_preview(limit: int = 5):
+    """Draft cold emails for the newest 'new'-status leads WITHOUT sending.
+
+    Boss-review gate: the autopilot's real drafts (same draft_email the live
+    pipeline uses), rendered for human approval. Nothing is sent, saved, or
+    queued — status changes never happen here.
+    """
+    from admin.tools.sba_email_draft import draft_email
+
+    leads = _load_leads_preferred()
+    fresh = [l for l in leads if l.get("status") in ("new", "candidate")]
+    fresh = sorted(fresh, key=lambda l: str(l.get("created_at") or ""), reverse=True)
+    out = []
+    for lead in fresh[:limit]:
+        try:
+            subject, body = await draft_email(lead, angle=None)
+            source = "llm"
+        except Exception:  # noqa: BLE001
+            subject, body = None, None
+            source = "error"
+        out.append({
+            "lead_id": lead.get("id"),
+            "name": lead.get("name"),
+            "status": lead.get("status"),
+            "score": lead.get("score"),
+            "city": lead.get("city"),
+            "email": lead.get("email") or "(email enrichment pending)",
+            "subject": subject,
+            "body": body,
+            "drafted_by": source,
+        })
+    return {
+        "success": True,
+        "data": {
+            "preview_count": len(out),
+            "note": "Preview only — nothing sent, queued, or saved.",
+            "drafts": out,
+        },
+    }
+
+
 # ── Leads CRUD ──────────────────────────────────────────────────────────────
 
 
