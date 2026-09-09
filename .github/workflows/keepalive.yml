@@ -11,5 +11,5 @@ jobs:
     steps:
       - name: Ping backend health
         run: |
-          curl -sS -m 30 "${{ secrets.BACKEND_URL }}/api/health" \
+          curl -sS -m 60 "https://agency-backend-v2.onrender.com/api/health" \
             -o /dev/null -w "HTTP %{http_code}\n"
