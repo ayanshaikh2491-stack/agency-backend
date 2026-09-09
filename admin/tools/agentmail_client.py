@@ -26,10 +26,12 @@ import os
 import time
 from typing import Any, Optional
 
-from agentmail import AgentMail
-from agentmail.inboxes.types.create_inbox_request import CreateInboxRequest
-
 logger = logging.getLogger(__name__)
+
+# NOTE: the `agentmail` SDK import is intentionally LAZY (inside functions).
+# This module must stay importable even when the SDK is not installed
+# (Render free tier keeps the image light). All entry points degrade
+# gracefully: no SDK -> no agentmail -> callers fall back to SMTP notify.
 
 # Registry of which agent is the PRIMARY sender. The CEO sends most emails and
 # relays on behalf of every other (inbox-less) agent.
@@ -65,7 +67,10 @@ def _save(data: dict[str, Any]) -> None:
         json.dump(data, f, indent=2)
 
 
-def _client(api_key: str) -> AgentMail:
+def _client(api_key: str):
+    """Lazy SDK import — works only when `agentmail` is installed."""
+    from agentmail import AgentMail  # noqa: PLC0415
+
     return AgentMail(api_key=api_key)
 
 
@@ -122,6 +127,9 @@ def get_inbox(actor: str, create: bool = True) -> Optional[dict[str, Any]]:
     c = _client(api_key)
     label = ACTOR_USERNAMES.get(actor, actor).replace(" ", "_").lower()[:25]
     try:
+        from agentmail.inboxes.types.create_inbox_request import (  # noqa: PLC0415
+            CreateInboxRequest,
+        )
         inbox = c.inboxes.create(request=CreateInboxRequest(
             username=label, client_id=f"tags-{label}"))
         entry = {
