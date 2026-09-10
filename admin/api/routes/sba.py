@@ -366,6 +366,52 @@ async def api_outreach_preview(limit: int = 5):
     }
 
 
+@router.post("/outreach/send")
+async def api_outreach_send(lead_id: str):
+    """Send ONE real cold email to ONE lead (boss-approved direct blast).
+
+    The surgical path: LLM-drafted (same draft_email the autopilot uses,
+    anti-fake-claims prompt), sent live via the owner's Gmail SMTP with owner
+    CC, then the lead is marked 'contacted' + a note is recorded. No
+    enrichment loop, no agent round-trips — this exists so the FIRST real
+    email can go out and be verified end-to-end in seconds.
+    """
+    lead = get_lead(lead_id)
+    if not lead:
+        raise HTTPException(404, f"Lead not found: {lead_id}")
+    if not (lead.get("email") or "").strip():
+        return {"success": False, "error": "lead has no email address"}
+    if lead.get("status") not in ("new", "candidate"):
+        return {"success": False, "error": f"already {lead.get('status')} — not re-sending"}
+
+    from admin.tools.sba_email_client import build_workspace_email_client
+    from admin.tools.sba_email_draft import draft_email
+
+    subject, body = await draft_email(lead, angle=None)
+    client = build_workspace_email_client("agency")
+    ok = await client.send_email(
+        to_email=lead["email"], subject=subject, body_text=body, cc_owner=True,
+    )
+    if not ok:
+        return {"success": False, "error": "SMTP send failed (check TAGS_SMTP_* env)"}
+
+    await update_lead(lead_id, {
+        "status": "contacted",
+        "notes": [{"text": f"Cold email sent via /outreach/send: '{subject}'"}],
+    })
+    _mirror_lead(get_lead(lead_id) or lead)
+    return {
+        "success": True,
+        "data": {
+            "lead_id": lead_id,
+            "to": lead["email"],
+            "subject": subject,
+            "body": body,
+            "note": "Sent live via SMTP with owner CC. Lead marked contacted.",
+        },
+    }
+
+
 # ── Leads CRUD ──────────────────────────────────────────────────────────────
 
 
