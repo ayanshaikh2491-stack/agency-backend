@@ -384,16 +384,21 @@ async def api_outreach_send(lead_id: str):
     if lead.get("status") not in ("new", "candidate"):
         return {"success": False, "error": f"already {lead.get('status')} — not re-sending"}
 
-    from admin.tools.sba_email_client import build_workspace_email_client
+    from admin.tools.sba_email_client import SBAEmailClient, build_workspace_email_client
     from admin.tools.sba_email_draft import draft_email
 
     subject, body = await draft_email(lead, angle=None)
+    # Workspace-config creds first; fall back to agency env creds (TAGS_SMTP_*).
+    # build_workspace_email_client alone returns a DISABLED client when the
+    # workspace config has no smtp fields — that silently failed the first blast.
     client = build_workspace_email_client("agency")
+    if not client.enabled:
+        client = SBAEmailClient()
     ok = await client.send_email(
         to_email=lead["email"], subject=subject, body_text=body, cc_owner=True,
     )
     if not ok:
-        return {"success": False, "error": "SMTP send failed (check TAGS_SMTP_* env)"}
+        return {"success": False, "error": "SMTP send failed (check TAGS_SMTP_* env + Gmail App Password)"}
 
     await update_lead(lead_id, {
         "status": "contacted",
