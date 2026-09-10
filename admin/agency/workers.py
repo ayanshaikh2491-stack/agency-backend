@@ -59,6 +59,275 @@ _DEFAULT_TOOL: dict[str, tuple[str, dict[str, Any]]] = {
     "analytics": ("weekly_report", {}),
 }
 
+# ── Agent brains (Q: "har agent apne hisab se soche") ─────────────────────
+# Each employee gets an LLM thinking layer: it UNDERSTANDS the CEO brief,
+# picks the best tool+args itself (no keyword matching), and interprets the
+# raw tool output in its expert voice with anomalies + a concrete next step.
+# If the LLM is unreachable, everything falls back to the deterministic
+# _parse_brief keyword path — the loop never breaks.
+
+_AGENT_BRAINS: dict[str, dict[str, str]] = {
+    "seo": {
+        "role": "SEO strategist",
+        "voice": (
+            "You think in rankings, search intent, and local visibility. For local "
+            "small businesses (dentists/salons/HVAC in Austin/Dallas TX), local "
+            "search visibility IS the revenue lever."
+        ),
+    },
+    "website": {
+        "role": "Website engineer",
+        "voice": (
+            "You think in speed, structure, trust signals, and conversion. A local "
+            "business site must load fast, look credible, and make calling dead simple."
+        ),
+    },
+    "content": {
+        "role": "Content strategist",
+        "voice": (
+            "You think in hooks, audience pain, and message-market fit. Content must "
+            "sound like the client's best customer talking, not a brochure."
+        ),
+    },
+    "ads": {
+        "role": "Media buyer",
+        "voice": (
+            "You think in CAC, ROAS, targeting, and budget efficiency. Every dollar "
+            "must trace to a lead; vague reach without tracking is a fail."
+        ),
+    },
+    "social": {
+        "role": "Social growth strategist",
+        "voice": (
+            "You think in algorithms, cadence, and engagement. Consistent, native, "
+            "platform-appropriate beats polished-but-corporate."
+        ),
+    },
+    "analytics": {
+        "role": "Data analyst",
+        "voice": (
+            "You think in trends, anomalies, and attribution. Numbers tell the story; "
+            "your job is to say WHAT changed, WHY it matters, and what to do next."
+        ),
+    },
+}
+
+# Tool catalog per agent: name -> one-line purpose (for the planning brain).
+_AGENT_CATALOGS: dict[str, dict[str, str]] = {
+    "seo": {
+        "site_audit": "Full on-page/technical audit of a URL (meta, headings, images, links)",
+        "keyword_research": "Keyword ideas + intent for a seed keyword",
+        "onpage_check": "Single-page onpage SEO check for a URL",
+        "parse_sitemap": "Parse a site's sitemap.xml",
+        "parse_robots_txt": "Parse a site's robots.txt",
+        "serp_check": "SERP look at who ranks for a keyword",
+        "generate_meta_tags": "Generate meta tags for a URL",
+        "generate_schema": "Generate JSON-LD schema for a URL",
+        "fix_audit_issues": "Fix earlier audit issues",
+        "generate_seo_report": "SEO report for a URL",
+        "track_rankings": "Track a keyword's ranking vs a target URL",
+    },
+    "website": {
+        "analyze_website": "Full site analysis (perf, seo, tech, a11y) for a URL",
+        "build_site": "Build a site for a business",
+        "design_planner": "Plan a site's design",
+        "generate_code": "Generate site code",
+        "publish_site": "Publish a built site",
+        "deploy_vercel": "Deploy to Vercel",
+        "connect_domain": "Connect a domain",
+        "check_domain": "Domain info check",
+        "domain_status": "Domain status check",
+        "tech_stack_advisor": "Recommend a tech stack",
+        "competitor_sites": "Analyze competitor sites",
+        "screenshot_site": "Screenshot a URL",
+        "check_performance": "Performance check for a URL",
+        "check_accessibility": "Accessibility check for a URL",
+        "check_links": "Broken-link check for a URL",
+        "check_ssl": "SSL check for a domain",
+        "check_uptime": "Uptime check for a URL",
+        "responsive_check": "Responsive/mobile check for a URL",
+        "security_check": "Security headers check for a URL",
+        "update_store_site": "Update stored site",
+    },
+    "content": {
+        "generate_content_brief": "Content brief for a topic",
+        "generate_blog_post": "Full blog post for a topic",
+        "generate_content_calendar": "Content calendar",
+        "generate_ad_copy": "Ad copy variants",
+        "rewrite_content": "Rewrite/improve given content",
+        "analyze_content_gaps": "Content gap analysis",
+        "analyze_readability": "Readability analysis of content",
+        "optimize_meta_descriptions": "Meta description variants",
+        "repurpose_for_social": "Repurpose content for social platforms",
+        "get_social_image_specs": "Image specs per social platform",
+        "search_images": "Search stock images for content",
+    },
+    "ads": {
+        "campaign_strategy": "Campaign strategy for a product/business",
+        "audience_research": "Audience research for a business",
+        "budget_planner": "Budget planning across platforms",
+        "competitor_ads": "Competitor ad analysis",
+        "platform_selection": "Which platforms to run ads on",
+        "ad_copy_generator": "Generate ad copy",
+        "creative_brief": "Creative brief for ads",
+        "ad_variations": "Ad variations for testing",
+        "landing_page_strategy": "LP strategy for a campaign",
+        "ad_hashtag_tags": "Hashtags/tags for ads",
+        "audience_builder": "Build target audience",
+        "lookalike_audience": "Lookalike audience setup",
+        "retargeting_setup": "Retargeting setup",
+        "exclusion_list": "Exclusion list",
+        "performance_analyzer": "Analyze campaign performance",
+        "auto_optimize": "Auto-optimize a campaign",
+        "ab_test_setup": "A/B test setup",
+        "campaign_report": "Campaign report",
+        "roas_calculator": "ROAS calculation",
+        "creative_score": "Score ad creative",
+    },
+    "social": {
+        "content_calendar": "Social content calendar",
+        "hashtag_research": "Hashtag research for a niche",
+        "posting_schedule": "Best posting times",
+        "competitor_analysis": "Competitor social analysis",
+        "trend_research": "Trend research for a niche",
+        "engagement_strategy": "Engagement strategy",
+        "platform_strategy": "Platform strategy",
+        "content_gap_analysis": "Social content gap analysis",
+        "audience_analysis": "Audience analysis",
+        "growth_tactics": "Growth tactics for a handle",
+        "generate_caption": "Generate a caption",
+        "repurpose_content": "Repurpose content cross-platform",
+        "dm_outreach": "DM outreach plan",
+        "influencer_research": "Influencer research",
+        "analytics_report": "Social analytics report",
+        "create_post": "Create a post",
+        "schedule_post": "Schedule a post",
+        "post_now": "Post immediately",
+        "organic_post": "Organic post via connected channels",
+        "organic_channels": "List organic channels",
+        "social_accounts": "Connected social accounts",
+        "content_queue": "Content queue status",
+        "post_analytics": "Post-level analytics",
+    },
+    "analytics": {
+        "weekly_report": "Weekly workspace report",
+        "monthly_report": "Monthly workspace report",
+        "campaign_report": "Campaign performance report",
+        "custom_report": "Custom report",
+        "track_traffic": "Traffic tracking",
+        "track_rankings": "Ranking tracking",
+        "track_conversions": "Conversion tracking",
+        "track_revenue": "Revenue tracking",
+        "cross_channel_analysis": "Cross-channel analysis",
+        "roi_calculator": "ROI calculation",
+        "funnel_analysis": "Funnel analysis",
+        "competitor_benchmark": "Competitor benchmarking",
+        "anomaly_detector": "Detect anomalies in metrics",
+        "threshold_alert": "Threshold alert setup",
+        "competitor_alert": "Competitor alert setup",
+        "traffic_forecast": "Traffic forecast",
+        "budget_forecast": "Budget forecast",
+        "growth_projection": "Growth projection",
+        "data_aggregator": "Aggregate data sources",
+        "email_report": "Email a report",
+    },
+}
+
+
+async def _llm_json(messages: list[dict], temperature: float = 0.3) -> str | None:
+    """One LLM chat call via the workspace default model. Returns content or
+    None on any failure (callers fall back deterministically)."""
+    try:
+        import openai
+
+        client = openai.AsyncOpenAI(
+            api_key=_resolve_api_key(""),
+            base_url=_resolve_api_base(""),
+        )
+        resp = await client.chat.completions.create(
+            model=_workspace_agent_model(),
+            messages=messages,
+            temperature=temperature,
+        )
+        return (resp.choices[0].message.content or "").strip() or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agent-brain LLM call failed: %s", exc)
+        return None
+
+
+async def _think_plan(agent_type: str, brief: str) -> tuple[str, dict[str, Any]] | None:
+    """Agent's own planning pass: understand the brief, pick tool+args.
+
+    Returns (tool_name, args-without-workspace) or None to fall back to
+    keyword parsing. The agent — not keywords — decides what to run.
+    """
+    brain = _AGENT_BRAINS.get(agent_type)
+    catalog = _AGENT_CATALOGS.get(agent_type)
+    if not brain or not catalog:
+        return None
+    tools_lines = "\n".join(f"- {name}: {desc}" for name, desc in catalog.items())
+    system = (
+        f"You are the {brain['role']} of TAGS Agency, an AI marketing agency serving "
+        f"local small businesses (dentists, salons, HVAC etc. in Austin/Dallas TX). "
+        f"{brain['voice']} You are an autonomous professional: understand what the "
+        "CEO actually needs from the brief, then choose the single best tool.\n\n"
+        f"Available tools:\n{tools_lines}\n\n"
+        "Reply with ONLY a JSON object, no other text:\n"
+        '{"tool": "<exact tool name from the list>", '
+        '"args": {<only the args this tool needs, extracted from the brief>}, '
+        '"why": "<one short line: what the CEO really needs>"}'
+    )
+    raw = await _llm_json(
+        [{"role": "system", "content": system}, {"role": "user", "content": brief}],
+        temperature=0.2,
+    )
+    if not raw:
+        return None
+    try:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        obj = json.loads(m.group(0) if m else raw)
+        tool = str(obj.get("tool") or "").strip()
+        if tool not in catalog:
+            return None
+        args = obj.get("args") if isinstance(obj.get("args"), dict) else {}
+        return tool, args
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agent-brain plan parse failed (%s): %s", agent_type, exc)
+        return None
+
+
+async def _interpret_result(
+    agent_type: str, brief: str, tool: str, result: Any
+) -> str | None:
+    """Agent's own interpretation pass: read the raw tool output and speak as
+    the domain expert — what the data says, one anomaly, one next step."""
+    brain = _AGENT_BRAINS.get(agent_type)
+    if not brain:
+        return None
+    try:
+        raw_json = json.dumps(result, default=str)[:3000]
+    except Exception:  # noqa: BLE001
+        raw_json = str(result)[:3000]
+    system = (
+        f"You are the {brain['role']} of TAGS Agency. {brain['voice']} "
+        "You just ran a tool and got raw output. Interpret it like the expert "
+        "you are — the CEO reads your words, not the JSON.\n\n"
+        "Rules:\n"
+        "- Max 4 short lines. Direct, no fluff. Hinglish ok.\n"
+        "- Say WHAT the data shows, ONE notable thing/anomaly, and ONE concrete "
+        "next step you recommend.\n"
+        "- ONLY what is in the data. No invented numbers, no fake confidence. "
+        "TAGS is a new small agency — never fabricate clients or results.\n"
+        "- Reply in plain text, no JSON."
+    )
+    user = (
+        f"CEO brief: {brief[:400]}\n\nTool ran: {tool}\n\nRaw output:\n{raw_json}"
+    )
+    return await _llm_json(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=0.4,
+    )
+
 
 def _hindi_status(agent: str, exc: Exception) -> str:
     msg = str(exc).strip()
@@ -118,10 +387,14 @@ def _parse_brief(task: str, ctx: dict) -> tuple[str, dict[str, Any]]:
 
 
 async def _run_real_agent(task: str, ctx: dict, agent_type: str | None = None) -> dict:
-    """Generic real worker: parse brief -> call the agent's tool dispatcher -> report.
+    """Thinking worker: understand brief -> choose tool -> run -> interpret.
 
     `agent_type` is passed by the registered wrapper so this single function can
     serve every employee (WorkerFn signature is (task, ctx)).
+
+    The agent's own LLM brain does the choosing now (Q: "har agent apne
+    hisab se soche"). If the brain is unavailable, we fall back to the
+    deterministic keyword parse — work never stops.
     """
     if not agent_type:
         raise ValueError("agent_type required for _run_real_agent")
@@ -129,10 +402,21 @@ async def _run_real_agent(task: str, ctx: dict, agent_type: str | None = None) -
     if not module_name:
         raise ValueError(f"no tool module for agent '{agent_type}'")
 
-    tool_name, args = _parse_brief(task, ctx)
-    if tool_name == "run_default":
-        tool_name, extra = _DEFAULT_TOOL.get(agent_type, ("site_audit", {}))
-        args.update(extra)
+    scope = ctx.get("scope", {}) or {}
+    ws = scope.get("workspace_id", "agency")
+
+    # Pass 1 — the agent's planning brain picks the tool (or None -> fallback).
+    planned = await _think_plan(agent_type, task)
+    if planned:
+        tool_name, plan_args = planned
+        args: dict[str, Any] = {"workspace_id": ws, "__brief": task, **plan_args}
+        chosen_by = "brain"
+    else:
+        tool_name, args = _parse_brief(task, ctx)
+        if tool_name == "run_default":
+            tool_name, extra = _DEFAULT_TOOL.get(agent_type, ("site_audit", {}))
+            args.update(extra)
+        chosen_by = "keyword-fallback"
 
     mod = importlib.import_module(module_name)
     dispatcher = getattr(mod, f"execute_{agent_type}_tool", None)
@@ -146,7 +430,16 @@ async def _run_real_agent(task: str, ctx: dict, agent_type: str | None = None) -
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: dispatcher(tool_name, args))
 
-    return {"agent": agent_type, "tool": tool_name, "result": result}
+    # Pass 2 — the agent interprets its own raw output in its expert voice.
+    interpretation = await _interpret_result(agent_type, task, tool_name, result)
+
+    return {
+        "agent": agent_type,
+        "tool": tool_name,
+        "chosen_by": chosen_by,
+        "result": result,
+        "interpretation": interpretation,
+    }
 
 
 # Natural-language cues (Hinglish/English) that mean "SBA, DO the real
