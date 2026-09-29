@@ -453,6 +453,22 @@ def store_agent_output(
         except Exception as e:
             logger.debug("SQLite agent_output write failed: %s", e)
     _fire_and_forget(_write())
+    try:
+        from admin.agency.ceo_autonomy import emit_event_sync
+
+        emit_event_sync(
+            "agent.output",
+            workspace_id=workspace_id,
+            source="workspace.manager",
+            payload={
+                "output_id": record["id"],
+                "agent_type": agent_type,
+                "task_preview": task[:300],
+                "output_preview": output[:300],
+            },
+        )
+    except Exception as exc:  # autonomy is additive and must not break agent work
+        logger.debug("CEO autonomy agent-output event failed: %s", exc)
     return record
 
 
@@ -509,6 +525,22 @@ def store_review(
         except Exception as e:
             logger.debug("SQLite review write failed: %s", e)
     _fire_and_forget(_write())
+    try:
+        from admin.agency.ceo_autonomy import emit_event_sync
+
+        emit_event_sync(
+            "agent.review",
+            workspace_id=workspace_id,
+            source="workspace.manager",
+            payload={
+                "review_id": record["id"],
+                "output_id": output_id,
+                "agent_type": agent_type,
+                "verdict": verdict,
+            },
+        )
+    except Exception as exc:  # autonomy is additive and must not break reviews
+        logger.debug("CEO autonomy review event failed: %s", exc)
 
     return record
 
@@ -559,6 +591,23 @@ def store_error(
         except Exception as e:
             logger.debug("SQLite error_log write failed: %s", e)
     _fire_and_forget(_write())
+    try:
+        from admin.agency.ceo_autonomy import emit_event_sync
+
+        emit_event_sync(
+            "agent.error",
+            workspace_id=workspace_id,
+            source="workspace.manager",
+            payload={
+                "error_id": record["id"],
+                "error_type": error_type,
+                "severity": severity,
+                "routed_to": routed_to,
+                "description_preview": description[:300],
+            },
+        )
+    except Exception as exc:  # autonomy is additive and must not break error routing
+        logger.debug("CEO autonomy error event failed: %s", exc)
 
     return record
 
@@ -600,21 +649,17 @@ async def route_to_agent(
     workspace_id: str,
     agent_type: str,
     message: str,
+    *,
+    safe_only: bool = False,
 ) -> str:
     """Route a message to an agent with expert-mode wrapping.
 
-    Expert mode (AGENCY_EXPERT_MODE=0 to disable) makes the agent work
-    like a real domain human: it first gets its account brief (client
-    facts, own memories, recent deliverables), then a senior-reviewer
-    pass polices quality before anything reaches the CEO.
-
-    Render kills the HTTP request ~100s; a multi-call agent (reasoning
-    phases + tools + expert review) on a slow provider chain can exceed
-    that and the edge returns a blank 502. Budget the whole path:
-    draft gets up to 55s, the review pass only runs if time remains and
-    gets max 25s. On budget exhaustion the caller still gets a fast,
-    clean response instead of a dropped connection.
+    ``safe_only`` is used by the autonomous CEO loop: it deliberately uses the
+    generic LLM path without domain tools, so internal analysis cannot send
+    email, publish content, spend money, or call an integration.
     """
+    if safe_only:
+        return await _route_to_agent_safe(workspace_id, agent_type, message)
     if os.getenv("AGENCY_EXPERT_MODE", "1") != "0":
         import time as _time
 
@@ -666,6 +711,40 @@ async def route_to_agent(
             logger.debug("expert review skipped (budget/error)", exc_info=True)
             return draft
     return await _route_to_agent_raw(workspace_id, agent_type, message)
+
+
+async def _route_to_agent_safe(
+    workspace_id: str,
+    agent_type: str,
+    message: str,
+) -> str:
+    """Tool-free analysis path for autonomous internal coordination."""
+    from admin.config import settings
+    import openai
+
+    ws = get_workspace(workspace_id)
+    if not ws:
+        return f"Workspace '{workspace_id}' not found."
+    client = openai.AsyncOpenAI(
+        api_key=settings.WORKSPACE_API_KEY or None,
+        base_url=settings.WORKSPACE_API_BASE or None,
+    )
+    system_prompt = (
+        f"You are the {agent_type.upper()} analysis agent for workspace "
+        f"'{ws.name}' (client: {ws.client_name}). Perform internal analysis only. "
+        "Do not call tools, contact anyone, publish content, spend money, or change external state."
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=settings.WORKSPACE_AGENT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message},
+            ],
+        )
+        return resp.choices[0].message.content or "No response generated."
+    except Exception as exc:
+        return f"{agent_type.upper()} safe analysis failed: {exc}"
 
 
 async def _route_to_agent_raw(
@@ -891,3 +970,134 @@ async def load_all_from_db() -> None:
         )
     except Exception as e:
         logger.warning("Failed to load data from SQLite: %s", e)
+
+
+# ── 24/7 Queue Processors (called from admin.workers.main) ─────────────────────
+
+async def process_agent_task_queue() -> None:
+    """Polls agent_tasks table, runs agents, writes results."""
+    from admin.persistence import get_workspace_db
+    from datetime import datetime, timezone
+    import json
+    
+    logger.info("Agent task queue processor started")
+    
+    while True:
+        try:
+            db = await get_workspace_db()
+            
+            # Get next queued task
+            cursor = await db.execute(
+                "SELECT * FROM agent_tasks WHERE status='queued' ORDER BY created_at LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            
+            if not row:
+                await asyncio.sleep(5)
+                continue
+            
+            task = dict(row)
+            task_id = task["id"]
+            
+            # Mark running
+            await db.execute(
+                "UPDATE agent_tasks SET status='running', started_at=? WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), task_id)
+            )
+            await db.commit()
+            
+            # Run agent
+            try:
+                result = await route_to_agent(
+                    task["workspace_id"],
+                    task["agent_type"],
+                    task["task"],
+                    safe_only=bool(task["safe_only"])
+                )
+                status, result_text, error = "done", str(result or ""), ""
+            except Exception as e:
+                status, result_text, error = "error", "", str(e)
+            
+            # Save result
+            await db.execute(
+                "UPDATE agent_tasks SET status=?, result=?, error=?, finished_at=? WHERE id=?",
+                (status, result_text[:4000], error[:500], datetime.now(timezone.utc).isoformat(), task_id)
+            )
+            await db.commit()
+            
+        except Exception as e:
+            logger.error("Agent queue error: %s", e)
+            await asyncio.sleep(10)
+
+
+async def process_handoff_queue() -> None:
+    """When handoff approved → fan out delivery agents."""
+    from admin.persistence import get_workspace_db
+    from datetime import datetime, timezone
+    import json
+    
+    logger.info("Handoff queue processor started")
+    
+    while True:
+        try:
+            db = await get_workspace_db()
+            
+            # Find approved handoffs that haven't been processed
+            cursor = await db.execute(
+                "SELECT * FROM handoffs WHERE status='approved' AND delivery_plan IS NOT NULL "
+                "AND id NOT IN (SELECT handoff_id FROM handoff_deliveries WHERE status IN ('started', 'done'))"
+            )
+            rows = await cursor.fetchall()
+            
+            for row in rows:
+                handoff = dict(row)
+                try:
+                    plan = json.loads(handoff["delivery_plan"])
+                except (TypeError, json.JSONDecodeError):
+                    logger.warning("Invalid delivery_plan for handoff %s", handoff["id"])
+                    continue
+                
+                agents = plan.get("agents", [])
+                if not agents:
+                    continue
+                
+                # Mark delivery started
+                await db.execute(
+                    "INSERT INTO handoff_deliveries (handoff_id, status, started_at) VALUES (?, 'started', ?)",
+                    (handoff["id"], datetime.now(timezone.utc).isoformat())
+                )
+                await db.commit()
+                
+                # Fan out agents in parallel
+                tasks = [
+                    route_to_agent(
+                        handoff["workspace_id"], 
+                        agent, 
+                        plan["tasks"][agent], 
+                        safe_only=True
+                    )
+                    for agent in agents if agent in plan.get("tasks", {})
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Collect results
+                result_dict = {}
+                for agent, result in zip(agents, results):
+                    if isinstance(result, Exception):
+                        result_dict[agent] = f"ERROR: {result}"
+                    else:
+                        result_dict[agent] = str(result or "")
+                
+                # Mark done
+                await db.execute(
+                    "UPDATE handoff_deliveries SET status='done', finished_at=?, results=? WHERE handoff_id=?",
+                    (datetime.now(timezone.utc).isoformat(), json.dumps(result_dict), handoff["id"])
+                )
+                await db.execute(
+                    "UPDATE handoffs SET status='in_progress' WHERE id=?", (handoff["id"],)
+                )
+                await db.commit()
+                
+        except Exception as e:
+            logger.error("Handoff queue error: %s", e)
+            await asyncio.sleep(30)

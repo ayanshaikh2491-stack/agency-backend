@@ -1,0 +1,86 @@
+services:
+  - type: worker
+    name: tags-agency-workers
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m admin.workers.main
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: tags-agency-db
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SBA_OWNER_EMAIL
+        sync: false
+      - key: SBA_OWNER_EMAIL_PASSWORD
+        sync: false
+      - key: AGENCY_CEO_API_KEY
+        sync: false
+      - key: AGENCY_CEO_API_BASE
+        sync: false
+      - key: WORKSPACE_API_KEY
+        sync: false
+      - key: WORKSPACE_API_BASE
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: E2B_TEMPLATE_ID
+        sync: false
+      - key: COMPOSIO_API_KEY
+        sync: false
+      - key: AGENT_MAX_EXTERNAL_PER_HOUR
+        sync: false
+      - key: AGENT_ALLOW_HIGH_RISK
+        sync: false
+      - key: SBA_OWNER_EMAIL
+        sync: false
+      - key: SBA_OWNER_EMAIL_PASSWORD
+        sync: false
+      - key: SBA_OWNER_NAME
+        sync: false
+      - key: SBA_SMTP_HOST
+        sync: false
+      - key: SBA_SMTP_PORT
+        sync: false
+      - key: SBA_IMAP_HOST
+        sync: false
+      - key: SBA_IMAP_PORT
+        sync: false
+      - key: SBA_OWNER_TIMEZONE
+        sync: false
+      - key: SBA_AUTOPILOT_INTERVAL_MINUTES
+        sync: false
+      - key: SBA_DAILY_EMAIL_CAP
+        sync: false
+      - key: SBA_FOLLOWUP_ENABLED
+        sync: false
+      - key: SBA_FOLLOWUP_MIN_DAYS
+        sync: false
+      - key: SBA_FOLLOWUP_MAX_PER_PASS
+        sync: false
+      - key: SBA_FOLLOWUP_TOUCHES
+        sync: false
+      - key: SBA_FOLLOWUP_GAP_DAYS
+        sync: false
+      - key: SBA_FOLLOWUP_SUGGEST_CALENDAR
+        sync: false
+      - key: AGENCY_AGENT_LOOP_INTERVAL_SECONDS
+        sync: false
+      - key: AGENCY_AGENT_LOOP_TICK_TIMEOUT_SECONDS
+        sync: false
+
+databases:
+  - name: tags-agency-db
+    plan: free

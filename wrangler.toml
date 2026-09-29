@@ -1,0 +1,15 @@
+name = "tags-agency-api"
+main = "src/workers/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+# These will be set in Cloudflare dashboard
+TURSO_DATABASE_URL = ""
+TURSO_AUTH_TOKEN = ""
+TELEGRAM_BOT_TOKEN = ""
+
+# Optional: Agent API keys for direct LLM calls from workers if needed
+AGENCY_CEO_API_KEY = ""
+AGENCY_CEO_API_BASE = ""
+WORKSPACE_API_KEY = ""
+WORKSPACE_API_BASE = ""

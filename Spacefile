@@ -1,0 +1,27 @@
+# Spacefile for TAGS Agency Backend
+# Docs: https://go.deta.dev/docs/spacefile/v0
+v: 0
+micros:
+  - name: backend
+    src: .
+    engine: python3.11
+    primary: true
+    # Install dependencies
+    # Deta Space runs `pip install -r requirements.txt` automatically if present
+    # requirements.txt should be at project root
+    # Override run command to use our app.py entrypoint
+    run: python app.py
+    # Include all necessary files
+    include:
+      - app.py
+      - admin
+      - requirements.txt
+      - .env
+      - start.sh
+      - check_env.py
+      - tags_agency.db
+      - tags_agency_workspace.db
+      - tags_agency_workspace.db-shm
+      - tags_agency_workspace.db-wal
+    # Environment variables will be set in Deta Space dashboard
+    # PORT is automatically set by Deta Space

@@ -62,12 +62,24 @@ CHROME_AGENT_PATH = os.getenv(
 CHROME_AGENT_BROWSER = os.getenv("CHROME_AGENT_BROWSER", "sba")
 CHROME_AGENT_STEALTH = os.getenv("CHROME_AGENT_STEALTH", "true").lower() in ("1", "true", "yes")
 
-# ── PostgreSQL (optional) ────────────────────────────────────────────
-# Default to SQLite local DB. Override with DATABASE_URL env var for production PG.
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "sqlite+aiosqlite:///./tags_agency.db",
-)
+# ── Database Configuration ─────────────────────────────────────────────────────
+# Turso (libSQL) takes precedence if set, then Render PostgreSQL, then local SQLite
+TURSO_DATABASE_URL: str = os.getenv("TURSO_DATABASE_URL", "")
+TURSO_AUTH_TOKEN: str = os.getenv("TURSO_AUTH_TOKEN", "")
+
+# Build DATABASE_URL based on available configuration
+if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
+    # Turso libSQL database
+    DATABASE_URL = f"sqlite+libsql://{TURSO_DATABASE_URL}?authToken={TURSO_AUTH_TOKEN}"
+elif os.getenv("RENDER_POSTGRES_URL"):
+    # Render PostgreSQL (when deployed on Render)
+    DATABASE_URL = os.getenv("RENDER_POSTGRES_URL")
+else:
+    # Default to SQLite local DB for development
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL",
+        "sqlite+aiosqlite:///./tags_agency.db",
+    )
 
 
 # ── Multi‑phase thinking loop steps ───────────────────────────────────────
@@ -142,6 +154,11 @@ AGENCY_AGENT_LOOP_INTERVAL_SECONDS: int = int(
 AGENCY_AGENT_LOOP_TICK_TIMEOUT_SECONDS: int = int(
     os.getenv("AGENCY_AGENT_LOOP_TICK_TIMEOUT_SECONDS", "120")
 )
+
+# ── Telegram Bot ─────────────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_WEBHOOK_URL: str = os.getenv("TELEGRAM_WEBHOOK_URL", "")
 
 # ── External PocketBase (survives container restart) ───────────────────────
 # Owner rule: PocketBase is THE database for key agency state (workspaces,

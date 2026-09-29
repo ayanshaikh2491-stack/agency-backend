@@ -1,0 +1,21 @@
+import sys
+sys.path.append('.')
+from admin.agency.ceo_autonomy import _skip_approval_for_internal, _is_external_action
+
+print('Testing skip approval logic')
+print('internal_analysis ->', _skip_approval_for_internal('internal_analysis'))
+print('email ->', _skip_approval_for_internal('email'))
+print('publish ->', _skip_approval_for_internal('publish'))
+print('spend ->', _skip_approval_for_internal('spend'))
+print('unknown ->', _skip_approval_for_internal('unknown'))
+print('External keywords test:')
+print('  send ->', _skip_approval_for_internal('send'))
+print('  post ->', _skip_approval_for_internal('post'))
+print('  outreach ->', _skip_approval_for_internal('outreach'))
+print('  payment ->', _skip_approval_for_internal('payment'))
+print('  contract ->', _skip_approval_for_internal('contract'))
+print('  agreement ->', _skip_approval_for_internal('agreement'))
+print('_is_external_action:')
+print('  internal_analysis ->', _is_external_action('internal_analysis'))
+print('  email ->', _is_external_action('email'))
+print('  publish ->', _is_external_action('publish'))
