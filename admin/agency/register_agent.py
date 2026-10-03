@@ -181,7 +181,7 @@ from __future__ import annotations
 
 import logging
 
-from agent_skill_loader import (
+from .agent_skill_loader import (
     detect_agent_skills,
     build_agent_skill_context,
     list_agent_skills,
