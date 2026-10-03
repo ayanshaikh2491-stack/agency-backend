@@ -15,6 +15,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from admin.persistence import get_workspace_db, row_to_dict
@@ -74,6 +75,41 @@ _SENSITIVE_KEYS = frozenset(
 _SENSITIVE_ASSIGNMENT = re.compile(
     r"(?i)(api[_-]?key|password|secret|token|authorization)\s*[:=]\s*[^\s,}]+"
 )
+
+
+_PLAYBOOK_CACHE: str | None = None
+
+
+def _load_ceo_playbook() -> str:
+    """Load the CEO operating doctrine once. Missing file is survivable."""
+    global _PLAYBOOK_CACHE
+    if _PLAYBOOK_CACHE is not None:
+        return _PLAYBOOK_CACHE
+    path = Path(__file__).resolve().parent / "ceo_playbook.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CEO playbook unreadable at %s: %s", path, _safe_error(exc))
+        text = (
+            "You are a co-founder CEO of a B2B agency. Prefer work already in "
+            "the pipeline over inventing new work. Dispatch to a named agent, "
+            "never do the work yourself. Internal work only: no email, no "
+            "spend, no publishing, no contracts. It is correct to conclude that "
+            "nothing should happen right now."
+        )
+    _PLAYBOOK_CACHE = text
+    return _PLAYBOOK_CACHE
+
+
+# Agent slugs the autonomous thinker is allowed to dispatch to. This is the
+# real roster: data/support agents that feed the doers, plus the doers
+# themselves. Anything else the model proposes is dropped rather than routed.
+_THINK_AGENTS = frozenset({
+    # data + support layer
+    "analyzing", "analytics", "memory",
+    # doers
+    "ceo", "sba", "seo", "content", "social", "ads", "website",
+})
 
 
 def _now() -> str:
@@ -640,8 +676,31 @@ class CEOAutonomy:
                 state = await _load_state()
                 state["last_tick_at"] = _now()
                 state["tick_count"] = int(state.get("tick_count", 0)) + 1
+                # Idle is not a reason to stay idle. Emit a think event so the
+                # next tick has the CEO choose its own next move, on a cadence
+                # so a quiet agency does not burn an LLM call every 15 seconds.
+                seeded = False
+                try:
+                    interval = float(os.getenv("AGENCY_CEO_THINK_INTERVAL_SEC", "300"))
+                    last_think = float(state.get("last_think_at", 0.0) or 0.0)
+                    now = time.time()
+                    if now - last_think >= interval:
+                        state["last_think_at"] = now
+                        await emit_event(
+                            "ceo.think",
+                            workspace_id=self._fallback_workspace(self._overview()),
+                            source="ceo_autonomy",
+                            payload={"reason": "no pending events; CEO deciding next action"},
+                        )
+                        seeded = True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # Never let the self-directed step take the loop down.
+                    logger.warning("CEO think seed failed: %s", _safe_error(exc))
                 await _save_state(state)
-                return {"status": "ok", "claimed": 0, "succeeded": 0, "failed": 0}
+                return {"status": "ok", "claimed": 0, "succeeded": 0, "failed": 0,
+                        "seeded_think": seeded}
 
             await self._prune_workers()
             available = max(1, self._max_workers - len(self._workers))
@@ -752,6 +811,142 @@ class CEOAutonomy:
             logger.warning("CEO autonomy event %s failed: %s", event.get("id"), _safe_error(exc))
             return False
 
+    async def _think(self, overview: dict[str, Any]) -> dict[str, Any]:
+        """Decide the next move by looking at agency state, not at an event.
+
+        _decide() is a lookup table keyed on event_type. It can only react to
+        events that something else already emitted, and the only place it
+        originates work itself is gated on `total_leads == 0`. So once the
+        agency had leads but no inbound events -- which is the normal state of
+        a business that already has a pipeline -- the CEO had nothing to key
+        on and idled forever. It reported a healthy heartbeat and a rising
+        tick_count while every agent sat in standby with last_wake = null.
+
+        This is the missing step: look at what is actually true right now and
+        choose the single most valuable internal action.
+
+        The model proposes; this method disposes. Its reply is untrusted
+        input: parsed as JSON, matched against an allowlist of real agent
+        slugs, and forced back into the internal-action contract that
+        _process_event already enforces. An unrecognised agent, an external
+        action, or an unparseable reply degrades to `observe` rather than
+        acting. Approval routing is untouched, so the model cannot widen its
+        own permissions.
+        """
+        summary = overview.get("summary", {}) if isinstance(overview, dict) else {}
+        try:
+            from admin.config import settings
+        except Exception as exc:  # noqa: BLE001
+            return {"action": "observe", "rationale": f"settings unavailable: {_safe_error(exc)}",
+                    "result": {"overview": summary}}
+
+        base = (settings.WORKSPACE_API_BASE or "").strip()
+        key = (settings.WORKSPACE_API_KEY or "").strip()
+        if not base or not key:
+            # Not an error worth spamming every tick -- say it once per tick
+            # in the rationale so /api/health shows why the agency is idle.
+            return {
+                "action": "observe",
+                "rationale": (
+                    "CEO has no thinker: WORKSPACE_API_BASE and WORKSPACE_API_KEY are "
+                    "both required for the CEO to decide its own next move."
+                ),
+                "result": {"overview": summary},
+            }
+
+        prompt = (
+            _load_ceo_playbook()
+            + "\n\n---\n\n"
+            "You are the CEO of TAGS Agency, a B2B agency that sells AI agents "
+            "to local service businesses. Render is the office you live in and "
+            "your agents are your staff. Nobody will hand you work.\n\n"
+            f"CURRENT STATE OF THE AGENCY:\n{_json_dumps(summary)}\n\n"
+            "Decide the single highest-value INTERNAL action to take right now, "
+            "then dispatch it to exactly one agent.\n"
+            "Choose an agent from: " + ", ".join(sorted(_THINK_AGENTS)) + "\n\n"
+            'Reply with JSON only, no prose:\n'
+            '{"action":"delegate","rationale":"one sentence, in your own words",'
+            '"agent_type":"<agent>","task":"<specific, checkable instruction>"}'
+        )
+
+        try:
+            import httpx
+
+            timeout = float(os.getenv("AGENCY_CEO_THINK_TIMEOUT_SEC", "60"))
+            resp = httpx.post(
+                base.rstrip("/") + "/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": settings.WORKSPACE_AGENT_MODEL or "auto",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 400,
+                    "temperature": 0.4,
+                },
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                return {
+                    "action": "observe",
+                    "rationale": f"CEO thinker returned HTTP {resp.status_code}",
+                    "result": {"overview": summary},
+                }
+            content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+            # Models often wrap JSON in a fence or add a sentence. Take the
+            # outermost object rather than trusting the whole string.
+            start, end = content.find("{"), content.rfind("}")
+            if start < 0 or end <= start:
+                return {"action": "observe", "rationale": "CEO thinker returned no JSON object",
+                        "result": {"overview": summary}}
+            parsed = _json_loads(content[start:end + 1], default={}) or {}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("CEO thinker failed: %s", _safe_error(exc))
+            return {
+                "action": "observe",
+                "rationale": f"CEO thinker unavailable: {_safe_error(exc)}",
+                "result": {"overview": summary},
+            }
+
+        agent_type = str(parsed.get("agent_type", "") or "").strip().lower()
+        task = str(parsed.get("task", "") or "").strip()
+        rationale = str(parsed.get("rationale", "") or "").strip()
+        action = str(parsed.get("action", "") or "").strip().lower()
+
+        # Validate rather than trust. An unknown agent or an external action
+        # is dropped here, not downstream.
+        if agent_type not in _THINK_AGENTS:
+            return {
+                "action": "observe",
+                "rationale": f"CEO proposed unknown agent '{agent_type[:40]}'; not dispatched",
+                "result": {"overview": summary, "proposed": parsed},
+            }
+        if not task or len(task) > 4000:
+            return {
+                "action": "observe",
+                "rationale": "CEO proposed an unusable task; not dispatched",
+                "result": {"overview": summary, "proposed": parsed},
+            }
+        if action not in ("delegate", "delegate_multi"):
+            action = "delegate"
+
+        return {
+            "action": action,
+            "rationale": f"CEO self-directed: {rationale or 'highest-value next action'}",
+            "workspace_id": self._fallback_workspace(overview),
+            "delegate": {
+                "agent_type": agent_type,
+                # Forced internal regardless of what the model asked for.
+                "action_type": "internal_analysis",
+                "task": (
+                    f"[CEO assigned this autonomously] {task} "
+                    "Internal analysis only: do not send email, contact anyone, "
+                    "spend money, publish, or create a contract."
+                ),
+            },
+            "result": {"overview": summary},
+        }
+
     async def _decide(self, event: dict[str, Any]) -> dict[str, Any]:
         """Inspect the agency overview and choose one bounded next action."""
         event_type = str(event.get("event_type", ""))
@@ -771,6 +966,10 @@ class CEOAutonomy:
                     "payload": payload,
                 },
             }
+        if event_type == "ceo.think":
+            # The self-directed step: no inbound event triggered this, the CEO
+            # asked itself what to work on next.
+            return await self._think(overview)
         if event_type == "lead.created":
             return {
                 "action": "delegate_lead_qualification",
