@@ -147,12 +147,40 @@ async def lifespan(app: FastAPI):
         logging.getLogger("admin.main").warning(
             "Service delivery loop failed to start (non-fatal): %s", exc)
 
-    # Set Telegram webhook
+    # ── Telegram webhook ────────────────────────────────────────────────────
+    # This must point at the WEB service (the only process serving
+    # /telegram/webhook), never at the 24/7 worker.
+    #
+    # The old fallback was a hardcoded URL to a BasicDeploy project that has
+    # since been removed. With no env var set, the bot kept POSTing there and
+    # Render never received anything. The URL is now derived from
+    # PUBLIC_BASE_URL, and if neither is set we say so instead of guessing.
     try:
         from admin.comm.telegram import set_webhook
-        webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "https://pzx9k1h2.basicdeploy.com/telegram/webhook")
-        result = await set_webhook(webhook_url)
-        logging.getLogger("admin.main").info("Telegram webhook set: %s", result)
+        base = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+        webhook_url = (os.getenv("TELEGRAM_WEBHOOK_URL") or "").strip() or (
+            f"{base}/telegram/webhook" if base else ""
+        )
+        if not webhook_url:
+            logging.getLogger("admin.main").warning(
+                "Telegram webhook NOT set: neither PUBLIC_BASE_URL nor "
+                "TELEGRAM_WEBHOOK_URL is configured. Telegram messages will "
+                "not reach this service.")
+        else:
+            result = await set_webhook(webhook_url)
+            # A failed webhook must not look like a normal boot line. If the
+            # token is missing or Telegram rejects the URL, every message the
+            # bot receives silently goes nowhere while the service reports
+            # healthy. Log it as a warning, not info.
+            if isinstance(result, dict) and result.get("success") is False:
+                logging.getLogger("admin.main").warning(
+                    "Telegram webhook FAILED to register at %s: %s -- Telegram "
+                    "messages will NOT reach this service. Check "
+                    "TELEGRAM_BOT_TOKEN and that the URL is publicly reachable.",
+                    webhook_url, result)
+            else:
+                logging.getLogger("admin.main").info(
+                    "Telegram webhook set to %s: %s", webhook_url, result)
     except Exception as exc:  # noqa: BLE001
         logging.getLogger("admin.main").warning(
             "Telegram webhook setup failed (non-fatal): %s", exc)
@@ -251,7 +279,10 @@ async def health():
     try:
         from admin.agency.ceo_autonomy import get_autonomy
 
-        st = await get_autonomy().status()
+        # Hard timeout: this endpoint is Render's healthCheckPath. If autonomy
+        # status ever blocks on a slow query, the health check must still
+        # answer -- otherwise Render will declare the service unhealthy.
+        st = await asyncio.wait_for(get_autonomy().status(), timeout=5.0)
         ceo_ready = bool(st.get("running"))
         detail = (
             f"ticks={st.get('tick_count', 0)} "
@@ -259,6 +290,9 @@ async def health():
             f"disabled={st.get('disabled', False)} "
             f"last_error={st.get('last_error') or ''}"
         )
+    except asyncio.TimeoutError:
+        detail = "autonomy status timed out after 5s (treated as not ready)"
+        logging.getLogger("admin.main").warning("health: %s", detail)
     except Exception as exc:  # noqa: BLE001
         detail = f"autonomy status unavailable: {type(exc).__name__}: {exc}"
         logging.getLogger("admin.main").warning("health: %s", detail)
