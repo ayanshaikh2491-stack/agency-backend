@@ -52,7 +52,22 @@ def _get_lock() -> asyncio.Lock:
         _lock = asyncio.Lock()
     return _lock
 
-DB_PATH = Path(__file__).resolve().parent.parent / "tags_agency_workspace.db"
+DB_PATH = Path(
+    os.getenv("AGENCY_WORKSPACE_DB_PATH", "").strip()
+    or str(Path(__file__).resolve().parent.parent / "tags_agency_workspace.db")
+)
+
+# Loud warning if we are on a path that a PaaS will throw away. Render, HF
+# Spaces and most container hosts use an ephemeral disk, so every redeploy
+# wipes anything written here — including the whole ceo_autonomy_* control
+# plane. Point AGENCY_WORKSPACE_DB_PATH at durable storage to avoid this.
+if not os.getenv("AGENCY_WORKSPACE_DB_PATH", "").strip():
+    logger.info(
+        "Workspace DB is the default local path (%s). If this process runs on "
+        "a host with an ephemeral disk, all workspace and autonomy state will "
+        "be lost on every deploy. Set AGENCY_WORKSPACE_DB_PATH to durable "
+        "storage, or accept and document the loss.", DB_PATH,
+    )
 
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS workspaces (
