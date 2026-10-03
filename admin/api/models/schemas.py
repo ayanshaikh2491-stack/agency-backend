@@ -118,3 +118,8 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
     ceo_ready: bool = False
     workspace_count: int = 0
+    # Why the endpoint answered the way it did: last autonomy tick, whether
+    # autonomy is disabled by config, the last error, or the reason the status
+    # lookup failed. Without this the ceo_ready flag was a bare boolean with
+    # nothing to act on, which is how it stayed wrong for so long unnoticed.
+    detail: str = ""

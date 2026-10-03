@@ -300,6 +300,7 @@ async def health():
     return HealthResponse(
         ceo_ready=ceo_ready,
         workspace_count=len(workspaces),
+        detail=detail,
     )
 
 
