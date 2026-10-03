@@ -60,6 +60,13 @@ services:
           name: tags-agency-db
           property: connectionString
 
+      # ── Canonical store: Turso ─────────────────────────────────────────
+      # See the worker service for why this takes precedence over DATABASE_URL.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       # Optional: overrides the derived PUBLIC_BASE_URL + /telegram/webhook
@@ -98,6 +105,16 @@ services:
         fromDatabase:
           name: tags-agency-db
           property: connectionString
+
+      # ── Canonical store: Turso ─────────────────────────────────────────
+      # Turso wins over DATABASE_URL when both are set (see
+      # admin/config/settings.py). Render's own Postgres stays as a fallback
+      # for environments where Turso is not configured, so nothing breaks if
+      # these two are left empty.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
 
       # See the note on the web service: this is the file-backed workspace +
       # autonomy store. Ephemeral on Render free unless redirected.
