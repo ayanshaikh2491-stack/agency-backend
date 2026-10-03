@@ -2,14 +2,22 @@
 
 Provides async SQLite connections using aiosqlite, with table initialization
 for workspaces, agent outputs, reviews, error logs, agent messages,
-agent knowledge, and CEO activity log.
+agent knowledge, agent tasks, and the CEO autonomy control plane.
+
+This module does NOT silently downgrade to an in-memory database when the
+configured file cannot be opened. It raises unless AGENCY_ALLOW_MEMORY_DB is
+explicitly set. See get_workspace_db() for why.
 """
 
 import asyncio
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+logger = logging.getLogger("admin.persistence")
 
 _db: aiosqlite.Connection | None = None
 _lock: asyncio.Lock | None = None
@@ -122,6 +130,73 @@ CREATE TABLE IF NOT EXISTS ceo_activity_log (
     timestamp TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ceo_autonomy_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ceo_autonomy_events (
+    id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    workspace_id TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'system',
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    processed_at TEXT,
+    error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_ceo_autonomy_events_pending
+    ON ceo_autonomy_events(status, created_at);
+
+CREATE TABLE IF NOT EXISTS ceo_autonomy_decisions (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL DEFAULT '',
+    workspace_id TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    rationale TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ceo_autonomy_decisions_workspace
+    ON ceo_autonomy_decisions(workspace_id, created_at);
+
+CREATE TABLE IF NOT EXISTS ceo_autonomy_tasks (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL DEFAULT '',
+    agent_type TEXT NOT NULL DEFAULT '',
+    action_type TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    result TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ceo_autonomy_tasks_status
+    ON ceo_autonomy_tasks(status, created_at);
+
+CREATE TABLE IF NOT EXISTS ceo_autonomy_approvals (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL DEFAULT '',
+    action_type TEXT NOT NULL,
+    description TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_by TEXT NOT NULL DEFAULT '',
+    decision_reason TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_ceo_autonomy_approvals_status
+    ON ceo_autonomy_approvals(status, created_at);
+
 CREATE TABLE IF NOT EXISTS email_outbox (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL DEFAULT '',
@@ -134,6 +209,47 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     created_at TEXT NOT NULL,
     sent_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS service_deliveries (
+    id TEXT PRIMARY KEY,
+    handoff_id TEXT NOT NULL UNIQUE,
+    workspace_id TEXT NOT NULL,
+    client_name TEXT NOT NULL DEFAULT '',
+    service_type TEXT NOT NULL DEFAULT 'website_seo_content',
+    status TEXT NOT NULL DEFAULT 'queued',
+    website_status TEXT NOT NULL DEFAULT 'pending',
+    seo_status TEXT NOT NULL DEFAULT 'pending',
+    content_status TEXT NOT NULL DEFAULT 'pending',
+    output_dir TEXT NOT NULL DEFAULT '',
+    report_path TEXT NOT NULL DEFAULT '',
+    website_result TEXT NOT NULL DEFAULT '{}',
+    seo_result TEXT NOT NULL DEFAULT '{}',
+    content_result TEXT NOT NULL DEFAULT '{}',
+    offer_value REAL,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    followup_status TEXT NOT NULL DEFAULT 'ready',
+    followup_due_at TEXT,
+    followup_subject TEXT NOT NULL DEFAULT '',
+    followup_body TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL DEFAULT '',
+    agent_type TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '',
+    safe_only INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'queued',
+    result TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status, created_at);
 """
 
 
@@ -164,11 +280,39 @@ async def get_workspace_db() -> aiosqlite.Connection:
         try:
             db_path_str = str(DB_PATH)
             _db = await aiosqlite.connect(db_path_str)
-        except (OSError, RuntimeError):
-            _db = await aiosqlite.connect(":memory:")
+        except (OSError, RuntimeError) as exc:
+            # HISTORY OF A DATA-LOSS BUG (do not reintroduce): this silently
+            # fell back to ":memory:". On a read-only filesystem, a full disk,
+            # or a permission error -- exactly what an ephemeral container hits
+            # -- the entire Agency OS swapped to a RAM database. init_persistence()
+            # then ran CREATE TABLE against RAM and SUCCEEDED, so boot completed
+            # cleanly and every workspace, agent output and the whole
+            # ceo_autonomy_* control plane silently evaporated on restart.
+            # There was no logger in this module at all, so it was invisible.
+            #
+            # Now an in-memory database requires an explicit opt-in, which is
+            # only for tests. Production gets a loud failure at boot.
+            if os.environ.get("AGENCY_ALLOW_MEMORY_DB", "").strip() in ("1", "true", "yes"):
+                logger.warning(
+                    "AGENCY_ALLOW_MEMORY_DB is set — using an IN-MEMORY database. "
+                    "All data is discarded on exit. Never do this outside tests."
+                )
+                _db = await aiosqlite.connect(":memory:")
+                in_memory = True
+            else:
+                raise RuntimeError(
+                    f"Cannot open workspace database at {DB_PATH}: {exc}. "
+                    "Refusing to fall back to an in-memory database, which would "
+                    "silently discard every workspace and autonomy record on "
+                    "restart. Fix the path/permissions, or set "
+                    "AGENCY_ALLOW_MEMORY_DB=1 only for tests."
+                ) from exc
+        else:
+            in_memory = False
 
         _db.row_factory = aiosqlite.Row
-        await _db.execute("PRAGMA journal_mode=WAL")
+        if not in_memory:
+            await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
         await _db.commit()
         return _db

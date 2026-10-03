@@ -128,16 +128,25 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create all tables. Safe to call on every startup."""
+    """Create all tables. Safe to call on every startup.
+
+    Raises if the schema cannot be created. Schema creation is a hard boot
+    dependency: if the tables do not exist, every later query fails at request
+    time while /api/health still reports ceo_ready=true. Callers that genuinely
+    want to continue without a schema must catch this themselves and say so.
+    """
     if engine is None:
-        logger.warning("No database engine — skipping init_db()")
-        return
+        raise RuntimeError(
+            "init_db() called with no database engine — the backend would boot "
+            "and then fail every query at request time."
+        )
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables created / verified")
     except Exception as exc:
         logger.error("init_db() failed: %s", exc)
+        raise
     # ── Lightweight column migration ────────────────────────────────────────
     # create_all only creates MISSING TABLES — existing tables never gain new
     # columns. Add columns added after initial deploy here (idempotent).
