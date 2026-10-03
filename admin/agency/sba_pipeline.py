@@ -115,7 +115,13 @@ _STATUS_MAP = {
 
 
 def _normalize_supabase_lead(l: dict[str, Any]) -> dict[str, Any]:
-    """Shape a Supabase lead like sba_store leads so the API/frontend can render it."""
+    """Shape a Supabase lead like sba_store leads so the API/frontend can render it.
+
+    ONLY valid for rows that actually came from Supabase. Applying it to
+    sba_store rows corrupts them (see load_leads_preferred docstring). There is
+    currently no remote read path, so this is unused -- kept only so that
+    re-enabling remote reads does not require rewriting the mapper.
+    """
     name = (l.get("name") or "").strip()
     return {
         "id": str(l.get("id") or ""),
@@ -138,20 +144,28 @@ def _normalize_supabase_lead(l: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_leads_preferred() -> list[dict[str, Any]]:
-    """Leads from Supabase (autopilot's live store) when configured, else local store.
+    """Leads for the API (status/list/detail) and the autopilot.
 
-    The autopilot writes found leads to Supabase; the API previously read only
-    the local SQLite store, so the dashboard showed zero leads while Supabase
-    had hundreds. Prefer Supabase so the frontend sees the real pipeline.
+    Leads live in the LOCAL store (sba_store, backed by SQLAlchemy). There is no
+    remote read path any more: `load_leads()` deliberately ignores its url/key
+    arguments and reads sba_store. PocketBase/Supabase is a write mirror only.
+
+    So local rows must be returned VERBATIM.
+
+    HISTORY OF A DATA-CORRUPTION BUG (do not reintroduce):
+    This used to pipe every local lead through _normalize_supabase_lead(),
+    which is a reshaper for Supabase rows, not for sba_store rows. For each lead
+    it rewrote `source` to "supabase" (via `category or workspace_name or
+    "supabase"`, both absent on local rows), overwrote `business_name` with
+    `name`, dropped `notes` entirely (the output dict has no notes key), and
+    replaced `context` with a fixed 4-key template. Verified live: a lead
+    created with source="manual" was served back with source="supabase",
+    business_name="<name>", notes absent, context clobbered. That endpoint backs
+    the frontend kanban and /api/sba/status, so every lead was being mangled.
+
+    _normalize_supabase_lead() below still exists, but it is only correct for
+    rows that actually came from Supabase. Do not apply it to sba_store rows.
     """
-    cfg = supabase_config()
-    if cfg:
-        try:
-            supa = load_leads(cfg[0], cfg[1])
-            if supa:
-                return [_normalize_supabase_lead(l) for l in supa]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("supabase lead load failed, falling back to local: %s", exc)
     from admin.agency.sba_store import list_leads
 
     return list_leads()
