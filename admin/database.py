@@ -1,6 +1,11 @@
-"""Async SQLAlchemy engine, session, and Base for PostgreSQL persistence.
+"""Async SQLAlchemy engine, session, and Base.
 
-Currently configured but gracefully falls back to in-memory if DB is unavailable.
+Supports PostgreSQL (asyncpg), Turso/libSQL (sqlalchemy-libsql), and local
+SQLite for development.
+
+This module does NOT degrade to a fallback database when the configured one is
+unusable. It raises at import time. See the comment above _build_engine() for
+why silent fallback was removed.
 """
 from __future__ import annotations
 
@@ -16,34 +21,93 @@ from admin.config import settings
 logger = logging.getLogger(__name__)
 
 # ── Engine ────────────────────────────────────────────────────────────────
-# DATABASE_URL may be a PG url or a fallback SQLite for local dev
+# DATABASE_URL may be postgres, Turso/libSQL, or a local SQLite file for dev.
+#
+# HISTORY OF A DATA-LOSSING BUG (do not reintroduce):
+#   The old check was `if "sqlite" in DATABASE_URL ...: use local SQLite`.
+#   settings.py builds Turso URLs as "sqlite+libsql://...", which CONTAINS the
+#   substring "sqlite" -- so a fully-configured Turso deployment silently fell
+#   through to `sqlite+aiosqlite:///./tags_agency.db`. On Render that file lives
+#   on ephemeral disk and is wiped on every restart, so the whole backend wrote
+#   leads into the void while reporting "OK". Same bug class as the documented
+#   sba_pipeline.py failure ("silently ran with all-zero stats for months").
+#
+#   Rule now: match the DIALECT exactly, and raise on anything unrecognised.
+#   A wrong DB must fail loudly at boot, never degrade to a local file.
 DATABASE_URL = settings.DATABASE_URL
 
-# For local dev without PG, use SQLite
-_using_fallback = False
-if "postgresql" in DATABASE_URL:
-    try:
-        engine = create_async_engine(DATABASE_URL, echo=False, pool_size=5, max_overflow=10)
-        # Quick connectivity check
-        import asyncio
-        # We'll lazy-check on first use
-    except Exception:
-        logger.warning("PostgreSQL not available, falling back to SQLite")
-        _using_fallback = True
 
-if _using_fallback or "sqlite" in DATABASE_URL or "postgresql" not in DATABASE_URL:
-    _fallback_url = "sqlite+aiosqlite:///./tags_agency.db"
-    try:
-        import aiosqlite  # noqa: F401
+def _build_engine(url: str):
+    """Create an async engine for `url`. Returns (engine, kind).
+
+    Raises on an unknown dialect instead of silently degrading to SQLite.
+    """
+    if not url:
+        raise ValueError("DATABASE_URL is empty")
+
+    # PostgreSQL. Normalise the several schemes people paste in.
+    if url.startswith(("postgres://", "postgresql://", "postgresql+")):
+        _pg = url
+        if _pg.startswith("postgres://"):
+            _pg = "postgresql://" + _pg[len("postgres://"):]
+        # asyncpg is our async driver; strip any sync driver that got pasted in.
+        _pg = _pg.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+        _pg = _pg.replace("postgresql://", "postgresql+asyncpg://")
+        return (
+            create_async_engine(_pg, echo=False, pool_size=5, max_overflow=10),
+            "postgresql",
+        )
+
+    # Turso / libSQL. MUST be checked before the plain-sqlite branch, because
+    # the libSQL dialect string literally starts with "sqlite+".
+    if url.startswith("sqlite+libsql://"):
+        try:
+            import sqlalchemy_libsql  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "DATABASE_URL points at libSQL/Turso but the dialect is not "
+                "installed. Add `sqlalchemy-libsql>=0.1.0` to requirements.txt."
+            ) from exc
+        return create_async_engine(url, echo=False), "libsql"
+
+    # Local SQLite (dev default, or an explicit sqlite+aiosqlite:// URL)
+    if url.startswith("sqlite"):
+        try:
+            import aiosqlite  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "DATABASE_URL points at SQLite but aiosqlite is not installed."
+            ) from exc
         # NullPool: every session opens its own connection. aiosqlite workers are
         # loop-bound, so pooled connections break when sync code calls
         # asyncio.run() multiple times (each run creates a fresh loop).
         from sqlalchemy.pool import NullPool
-        engine = create_async_engine(_fallback_url, echo=False, poolclass=NullPool)
-        logger.info("Using SQLite fallback: %s", _fallback_url)
-    except ImportError:
-        logger.warning("aiosqlite not installed — DB persistence disabled")
-        engine = None  # type: ignore[assignment]
+        return create_async_engine(url, echo=False, poolclass=NullPool), "sqlite"
+
+    raise ValueError(
+        f"Unrecognised DATABASE_URL dialect {url.split(':', 1)[0]!r}. Refusing "
+        "to fall back to a local SQLite file -- that silently loses data on "
+        "ephemeral disks. Fix the URL, or add the dialect here."
+    )
+
+
+try:
+    engine, DB_KIND = _build_engine(DATABASE_URL)
+except Exception as exc:  # noqa: BLE001
+    # Fail loud. Previously this path fell back to a local file, and the backend
+    # reported healthy while writing every row to scratch disk.
+    logger.error("FATAL: could not initialise database engine from %r: %s",
+                 DATABASE_URL, exc)
+    raise
+
+if DB_KIND == "sqlite":
+    logger.warning(
+        "Using local SQLite (%s) -- data will NOT survive a redeploy. Set "
+        "TURSO_DATABASE_URL + TURSO_AUTH_TOKEN, or DATABASE_URL, for production.",
+        DATABASE_URL,
+    )
+else:
+    logger.info("Database engine ready: %s", DB_KIND)
 
 # ── Session factory ───────────────────────────────────────────────────────
 AsyncSessionLocal: async_sessionmaker[AsyncSession] | None = None
