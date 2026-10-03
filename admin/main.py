@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from admin.api.models.schemas import HealthResponse
 from admin.api.routes import ceo as ceo_routes
+from admin.api.routes import ceo_autonomy as ceo_autonomy_routes
 from admin.api.routes import sba as sba_routes
 from admin.api.routes import workspace as workspace_routes
 from admin.api.routes import communication as comm_routes
@@ -26,14 +27,13 @@ from admin.api.routes import social as social_routes
 from admin.api.routes import workflows as workflows_routes
 from admin.api.routes import website as website_routes
 from admin.api.routes import analyzing as analyzing_routes
-from admin.freeapi_proxy import router as freeapi_router
 from admin.api.routes import extra as extra_routes
 from admin.api.routes import store as store_routes
 from admin.api.routes import agent_aliases as agent_aliases_routes
 from admin.api.routes import agents_crud as agents_crud_routes
 from admin.api.routes import multiagent as multiagent_routes
 from admin.api.routes import scheduler as scheduler_routes
-from admin.api.routes import tasks as tasks_routes
+from admin.comm import telegram as telegram_comm
 from admin.config import settings
 from admin.database import close_db, init_db
 from admin.agency.sba_store import load_all_from_db as load_sba_from_db
@@ -111,17 +111,6 @@ async def lifespan(app: FastAPI):
     for slug in ("ceo", "sba", "seo", "social", "website"):
         lc.register(slug)
 
-    # ── Worker registry (CRITICAL: without this, every run_worker call
-    # returns "unknown worker" — register_builtins was never wired at boot,
-    # so CEO delegation and /api/ceo/run fan-outs silently failed) ──────────
-    try:
-        from admin.agency.workers import register_builtins
-
-        await register_builtins()
-    except Exception as exc:  # noqa: BLE001
-        logging.getLogger("admin.main").warning(
-            "worker registration failed (non-fatal): %s", exc)
-
     # ── Mandate table (best-effort; self-guards on first use) ───────────────
     try:
         from admin.agency import mandates as mandates_mod
@@ -129,6 +118,15 @@ async def lifespan(app: FastAPI):
         await mandates_mod.init_mandates_table()
     except Exception as exc:  # noqa: BLE001
         logging.getLogger("admin.main").warning("mandates init failed: %s", exc)
+
+    # ── Event-driven CEO autonomy (best-effort, never breaks boot) ─────────
+    try:
+        from admin.agency.ceo_autonomy import get_autonomy
+
+        await get_autonomy().start()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("admin.main").warning(
+            "CEO autonomy control plane failed to start (non-fatal): %s", exc)
 
     # ── Autonomous CEO scheduler (best-effort, never breaks boot) ──────────
     try:
@@ -139,7 +137,43 @@ async def lifespan(app: FastAPI):
         logging.getLogger("admin.main").warning(
             "CEO autonomous scheduler failed to start (non-fatal): %s", exc)
 
+    # Autonomous client delivery: local website/SEO/content work is safe to
+    # run without credentials; outbound follow-up remains separately gated.
+    try:
+        from admin.agency import service_delivery
+
+        await service_delivery.start_loop()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("admin.main").warning(
+            "Service delivery loop failed to start (non-fatal): %s", exc)
+
+    # Set Telegram webhook
+    try:
+        from admin.comm.telegram import set_webhook
+        webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "https://pzx9k1h2.basicdeploy.com/telegram/webhook")
+        result = await set_webhook(webhook_url)
+        logging.getLogger("admin.main").info("Telegram webhook set: %s", result)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("admin.main").warning(
+            "Telegram webhook setup failed (non-fatal): %s", exc)
+
     yield
+    # ── Stop autonomous delivery before scheduler and database shutdown ───
+    try:
+        from admin.agency import service_delivery
+
+        await service_delivery.stop_loop()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("admin.main").warning(
+            "Service delivery loop failed to stop (non-fatal): %s", exc)
+    # ── Stop event-driven CEO autonomy before scheduler/database shutdown ──
+    try:
+        from admin.agency.ceo_autonomy import get_autonomy
+
+        await get_autonomy().stop()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("admin.main").warning(
+            "CEO autonomy control plane failed to stop (non-fatal): %s", exc)
     # ── Stop autonomous CEO scheduler (best-effort, never breaks shutdown) ──
     try:
         from admin.agency.scheduler import get_scheduler
@@ -170,6 +204,7 @@ app.add_middleware(
 
 # ── Mount routers ──────────────────────────────────────────────────────────
 app.include_router(ceo_routes.router)
+app.include_router(ceo_autonomy_routes.router)
 app.include_router(ceo_routes._old_router)  # Legacy /api/chat/agency endpoint
 app.include_router(sba_routes.router)
 app.include_router(workspace_routes.router)
@@ -191,8 +226,7 @@ app.include_router(agent_aliases_routes._seo_router)  # /api/agents/seo-engine/*
 app.include_router(agents_crud_routes.router)        # /api/agents/custom/*
 app.include_router(multiagent_routes.router)         # /api/ceo/run + /api/ceo/run/custom (multi-agent)
 app.include_router(scheduler_routes.router)          # /api/ceo/schedules — autonomous CEO triggers (L1)
-app.include_router(tasks_routes.router)              # /api/tasks — background agent work (no 60s limit)
-app.include_router(freeapi_router)                  # /freeapi/* — FreeLLMAPI dashboard proxy (internal Node)
+app.include_router(telegram_comm.router)             # /telegram/webhook + commands
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
@@ -200,9 +234,37 @@ app.include_router(freeapi_router)                  # /freeapi/* — FreeLLMAPI 
 
 @app.get("/api/health", response_model=HealthResponse, tags=["system"])
 async def health():
+    """Liveness + real autonomy state.
+
+    ceo_ready used to be the literal True, so this endpoint could not tell an
+    operator (or the keepalive cron) that the CEO autonomy loop was dead -- it
+    returned the same 200 either way. It is now derived from the autonomy
+    control plane's actual state.
+
+    Note the autonomy loop runs on the Render *worker* service, not in this
+    web process. When only the web service is running, ceo_ready will be False
+    by design; that is honest, not a regression.
+    """
     workspaces = list_workspaces()
+    ceo_ready = False
+    detail = ""
+    try:
+        from admin.agency.ceo_autonomy import get_autonomy
+
+        st = await get_autonomy().status()
+        ceo_ready = bool(st.get("running"))
+        detail = (
+            f"ticks={st.get('tick_count', 0)} "
+            f"last_tick={st.get('last_tick_at') or 'never'} "
+            f"disabled={st.get('disabled', False)} "
+            f"last_error={st.get('last_error') or ''}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        detail = f"autonomy status unavailable: {type(exc).__name__}: {exc}"
+        logging.getLogger("admin.main").warning("health: %s", detail)
+
     return HealthResponse(
-        ceo_ready=True,
+        ceo_ready=ceo_ready,
         workspace_count=len(workspaces),
     )
 

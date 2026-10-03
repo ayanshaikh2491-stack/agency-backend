@@ -77,9 +77,6 @@ async def create_lead(data: dict[str, Any]) -> dict[str, Any]:
         "business_name": data.get("business_name", ""),
         "email": data.get("email", ""),
         "phone": data.get("phone", ""),
-        "city": data.get("city", ""),
-        "state": data.get("state", ""),
-        "website": data.get("website", ""),
         "source": data.get("source", "manual"),
         "score": data.get("score", 50),
         "status": data.get("status", "new"),
@@ -91,17 +88,46 @@ async def create_lead(data: dict[str, Any]) -> dict[str, Any]:
     }
     _leads[lid] = lead
 
-    # Async persist to DB
+    # Async persist to DB. The in-memory dict above is the read path, so a
+    # failed write means the lead looks real until the process restarts and then
+    # is simply gone. Log loudly instead of discarding the exception.
     session = await _get_session()
-    if session:
+    if session is None:
+        logger.error(
+            "Lead %s was NOT persisted: no database session available "
+            "(AsyncSessionLocal is None). It lives only in the in-memory dict "
+            "and will be lost on restart.", lid)
+    else:
         try:
             model = LeadModel(**lead)
             session.add(model)
             await session.commit()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             await session.rollback()
+            logger.error(
+                "Lead %s FAILED to persist (%s: %s). It exists only in memory "
+                "and will be lost on restart.", lid, type(exc).__name__, exc,
+                exc_info=True)
         finally:
             await session.close()
+
+    try:
+        from admin.agency.ceo_autonomy import emit_event
+
+        await emit_event(
+            "lead.created",
+            source="sba_store",
+            payload={
+                "lead_id": lid,
+                "name": lead.get("name", ""),
+                "business_name": lead.get("business_name", ""),
+                "source": lead.get("source", ""),
+                "status": lead.get("status", ""),
+                "score": lead.get("score", 50),
+            },
+        )
+    except Exception as exc:  # autonomy is additive and must not break lead intake
+        logger.debug("CEO autonomy lead event failed: %s", exc)
 
     return lead
 
@@ -415,6 +441,23 @@ async def create_handoff(lead_id: str, ceo_message: str = "") -> dict[str, Any]:
         finally:
             await session.close()
 
+    try:
+        from admin.agency.ceo_autonomy import emit_event
+
+        await emit_event(
+            "handoff.created",
+            source="sba_store",
+            payload={
+                "handoff_id": handoff["id"],
+                "lead_id": lead_id,
+                "lead_name": handoff.get("brief", {}).get("lead_name", ""),
+                "business_name": handoff.get("brief", {}).get("business_name", ""),
+                "score": handoff.get("brief", {}).get("score", 50),
+            },
+        )
+    except Exception as exc:  # autonomy is additive and must not break handoffs
+        logger.debug("CEO autonomy handoff event failed: %s", exc)
+
     return handoff
 
 
@@ -433,21 +476,36 @@ async def mark_handoff_workspace_created(hid: str, workspace_id: str) -> bool:
     handoff = _handoffs.get(hid)
     if not handoff:
         return False
-    handoff["workspace_id"] = workspace_id
 
-    session = await _get_session()
-    if session:
+    try:
+        session = await _get_session()
+    except Exception:
+        return False
+    if session is None:
+        return False
+
+    previous_workspace_id = handoff.get("workspace_id")
+    try:
+        result = await session.execute(select(HandoffModel).where(HandoffModel.id == hid))
+        model = result.scalar_one_or_none()
+        if model is None:
+            return False
+        model.workspace_id = workspace_id
+        await session.commit()
+    except Exception:
         try:
-            result = await session.execute(select(HandoffModel).where(HandoffModel.id == hid))
-            model = result.scalar_one_or_none()
-            if model:
-                model.workspace_id = workspace_id
-                await session.commit()
-        except Exception:
             await session.rollback()
-        finally:
+        except Exception:
+            pass
+        handoff["workspace_id"] = previous_workspace_id
+        return False
+    finally:
+        try:
             await session.close()
+        except Exception:
+            pass
 
+    handoff["workspace_id"] = workspace_id
     return True
 
 
