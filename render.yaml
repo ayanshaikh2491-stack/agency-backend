@@ -14,10 +14,6 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
-      - key: SBA_OWNER_EMAIL
-        sync: false
-      - key: SBA_OWNER_EMAIL_PASSWORD
-        sync: false
       - key: AGENCY_CEO_API_KEY
         sync: false
       - key: AGENCY_CEO_API_BASE
