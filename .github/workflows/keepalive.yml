@@ -1,15 +1,74 @@
-name: Keep-alive ping
-# Render free service 15 min idle pe soti hai. Ye har 10 min health ping
-# bhejta hai = legitimate monitoring + service awake rehti hai.
+name: Keep-alive + CEO liveness
+
+# Why this exists
+#   Render's free plan sleeps a service after 15 minutes with no incoming
+#   traffic. Telegram only pushes when a human actually messages the bot, so
+#   without a keepalive the service would be asleep exactly when a lead
+#   replies. Ping every 10 minutes.
+#
+#   This now does two things:
+#     1. keeps the web service awake
+#     2. reports whether CEO autonomy is actually running
+#
+# Why (2) matters
+#   /api/health used to return a hardcoded ceo_ready=true, so it reported
+#   "healthy" no matter what. For a long time the 24/7 worker had no database
+#   tables at all, CEO autonomy was a silent no-op, and every status endpoint
+#   still said ok. /api/health now derives ceo_ready from the real autonomy
+#   state, so this job can go red when autonomy is dead.
+#
+# NOTE: on the web service CEO autonomy is intentionally OFF (the worker owns
+# it), so /api/health reports ceo_ready=false there. That is expected, not a
+# fault. Set WORKER_HEALTH_URL to the worker's reachable URL to make the
+# authoritative worker-side check active.
+
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
+
+env:
+  RENDER_HEALTH_URL: https://agency-backend-v2.onrender.com
+  # Leave empty until the worker service is exposed at a URL you can reach.
+  WORKER_HEALTH_URL: ""
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping backend health
+      - name: Keep the web service awake
         run: |
-          curl -sS -m 60 "https://agency-backend-v2.onrender.com/api/health" \
-            -o /dev/null -w "HTTP %{http_code}\n"
+          code=$(curl -sS -m 60 "$RENDER_HEALTH_URL/api/health" -o /tmp/health.json -w "%{http_code}")
+          echo "HTTP $code from $RENDER_HEALTH_URL/api/health"
+          echo "body: $(cat /tmp/health.json)"
+          if [ "$code" != "200" ]; then
+            echo "::error::Render health check failed (HTTP $code)"
+            exit 1
+          fi
+
+      - name: Surface CEO autonomy state
+        run: |
+          ceo_ready=$(grep -o '"ceo_ready":[a-z]*' /tmp/health.json | cut -d: -f2)
+          echo "ceo_ready on web service = ${ceo_ready:-unknown} (expected false: worker owns autonomy)"
+
+          if [ -z "$WORKER_HEALTH_URL" ]; then
+            echo "WORKER_HEALTH_URL is not set - skipping the worker-side autonomy check."
+            echo "Set it to enable monitoring of CEO autonomy itself."
+            exit 0
+          fi
+
+          wcode=$(curl -sS -m 60 "$WORKER_HEALTH_URL/api/ceo/autonomy/status" \
+                    -o /tmp/worker.json -w "%{http_code}")
+          echo "HTTP $wcode from $WORKER_HEALTH_URL/api/ceo/autonomy/status"
+          echo "body: $(cat /tmp/worker.json)"
+          if [ "$wcode" != "200" ]; then
+            echo "::error::Worker autonomy status unreachable (HTTP $wcode)"
+            exit 1
+          fi
+          running=$(grep -o '"running":[a-z]*' /tmp/worker.json | head -1 | cut -d: -f2)
+          ticks=$(grep -o '"tick_count":[0-9]*' /tmp/worker.json | head -1 | cut -d: -f2)
+          echo "CEO autonomy running=${running:-unknown} tick_count=${ticks:-unknown}"
+          if [ "$running" != "true" ]; then
+            echo "::error::CEO autonomy is NOT running on the worker"
+            exit 1
+          fi

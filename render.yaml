@@ -1,16 +1,69 @@
+# Render blueprint for the TAGS Agency backend.
+#
+# TWO SERVICES, ONE CLEAR OWNERSHIP RULE
+# --------------------------------------
+#   tags-agency-web      -> answers HTTP. Serves /api/*, /telegram/webhook,
+#                           the frontend dashboard. Runs NO 24/7 loops.
+#   tags-agency-workers  -> runs the 24/7 loops: CEO autonomy, CEO scheduler,
+#                           service delivery, SBA email autopilot, and the two
+#                           queue drainers.
+#
+# WHY THE SPLIT MATTERS
+#   Both processes used to start CEO autonomy and the scheduler in their own
+#   lifespan, so whenever both were deployed you had TWO autonomy loops racing
+#   on the same ceo_autonomy_events table. The web service now sets
+#   AGENCY_CEO_AUTONOMY_OFF=1 and AGENCY_SCHEDULER_OFF=1 so the loops have a
+#   single owner. Do not remove those two flags from the web service unless the
+#   worker service is deleted.
+#
+# KEEP THE WEB SERVICE AWAKE
+#   Render's free plan sleeps a service after 15 minutes with no incoming
+#   traffic. Telegram only pushes when someone actually messages the bot, so
+#   without a keepalive the service is asleep exactly when a lead replies.
+#   .github/workflows/keepalive.yml pings /api/health every 10 minutes.
+#
+# SECRETS
+#   Every key marked `sync: false` must be set by hand in the Render dashboard
+#   (Settings -> Environment). They are deliberately not put in this file.
+
 services:
-  - type: worker
-    name: tags-agency-workers
+  # ── Web service: HTTP only, no background loops ───────────────────────────
+  - type: web
+    name: tags-agency-web
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m admin.workers.main
+    startCommand: python app.py
+    healthCheckPath: /api/health
     envVars:
+      # Base URL this deployment is reachable at. The Telegram webhook URL is
+      # derived from it (PUBLIC_BASE_URL + /telegram/webhook). Set this to the
+      # actual Render URL, e.g. https://agency-backend-v2.onrender.com
+      - key: PUBLIC_BASE_URL
+        sync: false
+
+      # Single owner rule: the worker service runs the 24/7 loops.
+      - key: AGENCY_CEO_AUTONOMY_OFF
+        value: "1"
+      - key: AGENCY_SCHEDULER_OFF
+        value: "1"
+
+      # admin/persistence.py stores workspaces + the ceo_autonomy_* control
+      # plane here. Render's free plan uses an ephemeral disk, so the default
+      # repo-local path is wiped on every deploy. Point this at durable
+      # storage, or accept the loss knowingly.
+      - key: AGENCY_WORKSPACE_DB_PATH
+        sync: false
+
       - key: DATABASE_URL
-        fromDatabase: tags-agency-db
+        fromDatabase:
+          name: tags-agency-db
+          property: connectionString
+
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: TELEGRAM_CHAT_ID
+      # Optional: overrides the derived PUBLIC_BASE_URL + /telegram/webhook
+      - key: TELEGRAM_WEBHOOK_URL
         sync: false
       - key: OPENAI_API_KEY
         sync: false
@@ -21,6 +74,68 @@ services:
       - key: WORKSPACE_API_KEY
         sync: false
       - key: WORKSPACE_API_BASE
+        sync: false
+      - key: WORKSPACE_AGENT_MODEL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+
+  # ── Worker service: the 24/7 loops ───────────────────────────────────────
+  - type: worker
+    name: tags-agency-workers
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m admin.workers.main
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: tags-agency-db
+          property: connectionString
+
+      # See the note on the web service: this is the file-backed workspace +
+      # autonomy store. Ephemeral on Render free unless redirected.
+      - key: AGENCY_WORKSPACE_DB_PATH
+        sync: false
+
+      # The worker does NOT set the Telegram webhook (that is the web service's
+      # job), but the SBA autopilot replies to leads from this inbox.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: SBA_OWNER_EMAIL
+        sync: false
+      - key: SBA_OWNER_EMAIL_PASSWORD
+        sync: false
+      - key: SBA_OWNER_NAME
+        sync: false
+      - key: SBA_SMTP_HOST
+        sync: false
+      - key: SBA_SMTP_PORT
+        sync: false
+      - key: SBA_IMAP_HOST
+        sync: false
+      - key: SBA_IMAP_PORT
+        sync: false
+      - key: SBA_OWNER_TIMEZONE
+        sync: false
+
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: AGENCY_CEO_API_KEY
+        sync: false
+      - key: AGENCY_CEO_API_BASE
+        sync: false
+      - key: WORKSPACE_API_KEY
+        sync: false
+      - key: WORKSPACE_API_BASE
+        sync: false
+      - key: WORKSPACE_AGENT_MODEL
         sync: false
       - key: GEMINI_API_KEY
         sync: false
@@ -40,22 +155,8 @@ services:
         sync: false
       - key: AGENT_ALLOW_HIGH_RISK
         sync: false
-      - key: SBA_OWNER_EMAIL
-        sync: false
-      - key: SBA_OWNER_EMAIL_PASSWORD
-        sync: false
-      - key: SBA_OWNER_NAME
-        sync: false
-      - key: SBA_SMTP_HOST
-        sync: false
-      - key: SBA_SMTP_PORT
-        sync: false
-      - key: SBA_IMAP_HOST
-        sync: false
-      - key: SBA_IMAP_PORT
-        sync: false
-      - key: SBA_OWNER_TIMEZONE
-        sync: false
+
+      # ── SBA autopilot tuning ────────────────────────────────────────────
       - key: SBA_AUTOPILOT_INTERVAL_MINUTES
         sync: false
       - key: SBA_DAILY_EMAIL_CAP
@@ -72,9 +173,29 @@ services:
         sync: false
       - key: SBA_FOLLOWUP_SUGGEST_CALENDAR
         sync: false
+
+      # ── CEO autonomy tuning ────────────────────────────────────────────
+      # Declared explicitly so the effective config is auditable even though
+      # these have defaults. None of these were present in the old blueprint.
+      - key: AGENCY_CEO_AUTONOMY_TICK_SEC
+        sync: false
+      - key: AGENCY_CEO_AUTONOMY_MAX_EVENTS
+        sync: false
+      - key: AGENCY_CEO_AUTONOMY_MAX_WORKERS
+        sync: false
+      - key: AGENCY_CEO_AUTONOMY_AGENT_TIMEOUT_SEC
+        sync: false
+      - key: AGENCY_CEO_AUTONOMY_HEARTBEAT_SEC
+        sync: false
+      # Gates the whole bootstrap-prospecting path. A large value here makes
+      # autonomy look alive while it does nothing.
+      - key: AGENCY_PROSPECT_INTERVAL_SEC
+        sync: false
       - key: AGENCY_AGENT_LOOP_INTERVAL_SECONDS
         sync: false
       - key: AGENCY_AGENT_LOOP_TICK_TIMEOUT_SECONDS
+        sync: false
+      - key: AGENCY_SCHEDULER_TICK_SEC
         sync: false
 
 databases:
