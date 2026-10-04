@@ -686,6 +686,7 @@ class CEOAutonomy:
                     now = time.time()
                     if now - last_think >= interval:
                         state["last_think_at"] = now
+                        state["thinks_seeded"] = int(state.get("thinks_seeded", 0) or 0) + 1
                         await emit_event(
                             "ceo.think",
                             workspace_id=self._fallback_workspace(self._overview()),
@@ -969,7 +970,16 @@ class CEOAutonomy:
         if event_type == "ceo.think":
             # The self-directed step: no inbound event triggered this, the CEO
             # asked itself what to work on next.
-            return await self._think(overview)
+            decision = await self._think(overview)
+            try:
+                await _save_state({
+                    "last_think_at": time.time(),
+                    "last_think_action": str(decision.get("action", "") or ""),
+                    "last_think_rationale": str(decision.get("rationale", "") or "")[:500],
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("CEO autonomy could not record think outcome: %s", _safe_error(exc))
+            return decision
         if event_type == "lead.created":
             return {
                 "action": "delegate_lead_qualification",
@@ -1368,12 +1378,33 @@ class CEOAutonomy:
                 cursor = await db.execute(query)
                 row = await cursor.fetchone()
                 counts[label] = int(row[0]) if row else 0
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Never swallow this. Reporting zeros because the query failed is
+            # indistinguishable from a genuinely idle agency, which is how a
+            # dead control plane kept reporting "ok, nothing to do".
+            counts["error"] = _safe_error(exc)
+            logger.warning("CEO autonomy status count query failed: %s", _safe_error(exc))
         state["counts"] = counts
         state["tick_sec"] = self._tick_sec
         state["max_events_per_tick"] = self._max_events
         state["max_workers"] = self._max_workers
+        # Is the self-directed step actually firing? Without these, a CEO that
+        # never thinks is indistinguishable from one that is waiting.
+        state["think_interval_sec"] = float(os.getenv("AGENCY_CEO_THINK_INTERVAL_SEC", "300"))
+        state["thinks_seeded"] = int(state.get("thinks_seeded", 0) or 0)
+        state["last_think_at"] = float(state.get("last_think_at", 0.0) or 0.0)
+        state["last_think_action"] = str(state.get("last_think_action", "") or "")
+        state["last_think_rationale"] = str(state.get("last_think_rationale", "") or "")
+        try:
+            from admin.config import settings as _settings
+
+            thinker_ok = bool(
+                (_settings.WORKSPACE_API_BASE or "").strip()
+                and (_settings.WORKSPACE_API_KEY or "").strip()
+            )
+        except Exception:  # noqa: BLE001
+            thinker_ok = False
+        state["thinker_configured"] = thinker_ok
         return _safe_value(state)
 
 
