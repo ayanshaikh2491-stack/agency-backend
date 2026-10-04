@@ -140,9 +140,15 @@ if [ -n "$CUSTOM_ENDPOINTS_JSON" ] && [ -n "$seed_token" ]; then
           const r = await fetch("http://127.0.0.1:" + process.env.FREEAPI_PORT + "/api/keys/custom", {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: "Bearer " + process.env.SEED_TOKEN },
-            body: JSON.stringify(it),
+            // The route schema names the credential `apiKey`. Accepting `key`
+            // too, because that is the obvious name to reach for and the only
+            // evidence of a rejection used to be a bare "-> 400".
+            body: JSON.stringify(it.apiKey || !it.key ? it : { ...it, apiKey: it.key }),
           });
           console.log("[seed] custom", it.label || it.baseUrl, "->", r.status);
+          if (!r.ok) {
+            console.log("[seed] custom REJECTED:", r.status, (await r.text()).slice(0, 400));
+          }
         } catch (e) { console.log("[seed] custom", it.label || it.baseUrl, "failed:", e.message); }
       }
     })();
