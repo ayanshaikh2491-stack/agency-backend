@@ -34,6 +34,7 @@ from admin.api.routes import agents_crud as agents_crud_routes
 from admin.api.routes import multiagent as multiagent_routes
 from admin.api.routes import scheduler as scheduler_routes
 from admin.comm import telegram as telegram_comm
+from admin import freeapi_proxy
 from admin.config import settings
 from admin.database import close_db, init_db
 from admin.agency.sba_store import load_all_from_db as load_sba_from_db
@@ -255,6 +256,7 @@ app.include_router(agents_crud_routes.router)        # /api/agents/custom/*
 app.include_router(multiagent_routes.router)         # /api/ceo/run + /api/ceo/run/custom (multi-agent)
 app.include_router(scheduler_routes.router)          # /api/ceo/schedules — autonomous CEO triggers (L1)
 app.include_router(telegram_comm.router)             # /telegram/webhook + commands
+app.include_router(freeapi_proxy.router)             # /freeapi/* -> LLM gateway on :3001
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
