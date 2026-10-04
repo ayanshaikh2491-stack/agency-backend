@@ -3,36 +3,219 @@
     "role": "Co-founder & strategic brain — orchestrates, delegates, reports to boss",
     "skills_folder": "ceo_skills_repo",
     "skill_count": 15,
-    "core": true
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": false,
+    "workspace_agent": false,
+    "host": "both",
+    "module": "admin.agency.ceo",
+    "class": "AgencyCEO",
+    "capabilities": [
+      "chat",
+      "strategy",
+      "orchestration",
+      "approval"
+    ],
+    "note": "Chat ingress is stateless I/O, but the autonomy loop is a long-running background process — so this agent only works on the Render host."
   },
   "sba": {
     "role": "Sales / lead-gen agent",
     "skills_folder": "sba_skills_repo",
     "skill_count": 8,
-    "core": true
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": true,
+    "workspace_agent": true,
+    "host": "render",
+    "module": "admin.workspace.agents.sba",
+    "class": "SBAAgent",
+    "capabilities": [
+      "lead_gen",
+      "qualification",
+      "email",
+      "handoff",
+      "prospecting"
+    ],
+    "note": "Drives a real Chrome/Playwright browser profile (admin/tools/chrome_tool.py) and an SMTP pipeline. Cannot run on Cloudflare Workers."
   },
   "seo": {
     "role": "Search & AI-visibility agent (SEO/AEO/GEO)",
     "skills_folder": "seo_skills_repo",
     "skill_count": 6,
-    "core": true
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": true,
+    "workspace_agent": true,
+    "host": "both",
+    "module": "admin.workspace.agents.seo",
+    "class": "SEOAgent",
+    "capabilities": [
+      "keywords",
+      "audit",
+      "technical",
+      "content",
+      "backlinks"
+    ],
+    "note": "Core audit/keyword path is stateless REST + LLM (runs anywhere); the SERP/screenshot sub-tasks shell out to a browser, so Render stays the default."
   },
-  "social": {
-    "role": "Content & social-media agent",
-    "skills_folder": "social_skills_repo",
-    "skill_count": 6,
-    "core": true
+  "content": {
+    "role": "Content agent — blog, social copy, newsletters",
+    "skills_folder": null,
+    "skill_count": 0,
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": true,
+    "workspace_agent": true,
+    "host": "cloudflare",
+    "module": "admin.workspace.agents.content",
+    "class": "ContentAgent",
+    "capabilities": [
+      "blog",
+      "social",
+      "hooks",
+      "newsletter",
+      "copy"
+    ]
   },
   "website": {
     "role": "Design / frontend / deploy agent",
     "skills_folder": "website_skills_repo",
     "skill_count": 18,
-    "core": true
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": true,
+    "workspace_agent": true,
+    "host": "render",
+    "module": "admin.workspace.agents.website",
+    "class": "WebsiteAgent",
+    "capabilities": [
+      "design",
+      "development",
+      "deploy",
+      "hosting",
+      "maintenance"
+    ],
+    "note": "Writes files, runs npm/shell and Playwright webapp tests. Needs a real filesystem and a shell."
+  },
+  "ads": {
+    "role": "Ads agent — Google/Meta campaigns and optimization",
+    "skills_folder": null,
+    "skill_count": 0,
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": true,
+    "workspace_agent": true,
+    "host": "cloudflare",
+    "module": "admin.workspace.agents.ads",
+    "class": "AdsAgent",
+    "capabilities": [
+      "google",
+      "meta",
+      "optimization",
+      "budget",
+      "creative"
+    ]
+  },
+  "social": {
+    "role": "Content & social-media agent",
+    "skills_folder": "social_skills_repo",
+    "skill_count": 6,
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": true,
+    "workspace_agent": true,
+    "host": "cloudflare",
+    "module": "admin.workspace.agents.social",
+    "class": "SocialAgent",
+    "capabilities": [
+      "linkedin",
+      "twitter",
+      "instagram",
+      "scheduling",
+      "ads"
+    ],
+    "note": "Publishing is plain REST against the platform APIs. The Facebook browser fallback lives in the render-only organic tool path, not in this agent."
+  },
+  "analytics": {
+    "role": "Analytics agent — reports, ROI, forecasts",
+    "skills_folder": null,
+    "skill_count": 0,
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": true,
+    "workspace_agent": true,
+    "host": "cloudflare",
+    "module": "admin.workspace.agents.analytics",
+    "class": "AnalyticsAgent",
+    "capabilities": [
+      "forecast",
+      "funnel",
+      "dashboard",
+      "revenue",
+      "metrics"
+    ]
+  },
+  "analyzing": {
+    "role": "Analyzing agent — cross-channel insight synthesis",
+    "skills_folder": null,
+    "skill_count": 0,
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": false,
+    "workspace_agent": true,
+    "host": "cloudflare",
+    "module": "admin.workspace.agents.analyzing",
+    "class": "AnalyzingAgent",
+    "capabilities": [
+      "insight",
+      "anomaly_detection",
+      "root_cause",
+      "recommendation"
+    ],
+    "note": "Real and fully wired (admin/workspace/agents/analyzing.py, 20 analytics tools), but NOT a fan-out worker: workers._run_real_agent needs an admin/tools/analyzing_tools.py with execute_analyzing_tool. fanout stays false until that exists."
+  },
+  "memory": {
+    "role": "Memory agent — cross-session recall and context retrieval",
+    "skills_folder": null,
+    "skill_count": 0,
+    "core": true,
+    "implemented": true,
+    "placeholder": false,
+    "fanout": false,
+    "workspace_agent": true,
+    "host": "cloudflare",
+    "module": "admin.workspace.agents.memory",
+    "class": "MemoryAgent",
+    "capabilities": [
+      "recall",
+      "store",
+      "context",
+      "summarize"
+    ],
+    "note": "Real and fully wired (admin/workspace/agents/memory.py), but NOT a fan-out worker — same missing admin/tools/memory_tools.py dispatcher as analyzing."
   },
   "aws": {
     "role": "AWS cloud infra & deployment agent",
     "skills_folder": "aws_skills_repo",
     "skill_count": 3,
-    "core": false
+    "core": false,
+    "implemented": false,
+    "placeholder": true,
+    "fanout": false,
+    "workspace_agent": false,
+    "host": "render",
+    "module": null,
+    "class": null,
+    "capabilities": [],
+    "note": "SCAFFOLD, NOT AN AGENT. Created by register_agent() as a demo of the onboarding flow. There is no admin/workspace/agents/aws.py, no admin/tools/aws_tools.py, no route or worker references it, and its 3 SKILL.md files are the auto-generated stub text. host='render' is aspirational (a real AWS agent would need the AWS CLI). Delete this entry only after deleting the aws_skills_repo/ + aws_skills.py artifacts it points at."
   }
 }

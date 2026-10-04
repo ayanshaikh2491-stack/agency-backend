@@ -15,6 +15,13 @@ Result: the NEW agent thinks in its own domain (like CEO/AWS/etc.), AND the CEO
 knows about it — exactly the "everyone should know their own brain + the CEO
 knows why" requirement.
 
+NOTE: a registered agent is NOT automatically runnable. register_agent() builds
+a skill brain and a registry entry; the agent still has to be given a real
+implementation before the CEO can fan work out to it. New entries therefore
+land with implemented=False / placeholder=True / fanout=False. Flip those in
+admin/agency/agent_registry.json once the agent class and (for fan-out) its
+admin/tools/<name>_tools.py dispatcher actually exist.
+
 Usage (from code or a one-off script):
     from register_agent import register_agent
     register_agent(
@@ -32,63 +39,39 @@ from pathlib import Path
 import shutil
 
 from .agent_skill_loader import AGENCY_DIR
+from . import agent_catalog
 
 logger = logging.getLogger(__name__)
 
 # ── Master registry of every agent the CEO/orchestrator knows about ─────────
-# Core agents are seeded here; register_agent() appends new ones at runtime and
-# persists them to AGENT_REGISTRY_FILE so restarts remember them.
-AGENT_REGISTRY_FILE = AGENCY_DIR / "agent_registry.json"
+# The canonical store is admin/agency/agent_registry.json, read/written by
+# agent_catalog. This module keeps the same public names it always had:
+# AGENT_REGISTRY_FILE, AGENT_REGISTRY, _load_registry(), _save_registry(),
+# register_agent(), list_agents().
+#
+# Every other agent list in the repo (workspace/manager.DEFAULT_AGENTS,
+# api/routes/multiagent.BUILTIN_AGENT_IDS, the Cloudflare worker's /api/agents)
+# is now DERIVED from this file — see agent_catalog for the derivation rules.
+# Add or retire an agent by editing agent_registry.json, not by editing one of
+# the consumers.
+AGENT_REGISTRY_FILE = agent_catalog.AGENT_REGISTRY_FILE
 
-AGENT_REGISTRY: dict[str, dict] = {
-    "ceo": {
-        "role": "Co-founder & strategic brain — orchestrates, delegates, reports to boss",
-        "skills_folder": "ceo_skills_repo",
-        "skill_count": 15,
-        "core": True,
-    },
-    "sba": {
-        "role": "Sales / lead-gen agent",
-        "skills_folder": "sba_skills_repo",
-        "skill_count": 8,
-        "core": True,
-    },
-    "seo": {
-        "role": "Search & AI-visibility agent (SEO/AEO/GEO)",
-        "skills_folder": "seo_skills_repo",
-        "skill_count": 6,
-        "core": True,
-    },
-    "social": {
-        "role": "Content & social-media agent",
-        "skills_folder": "social_skills_repo",
-        "skill_count": 6,
-        "core": True,
-    },
-    "website": {
-        "role": "Design / frontend / deploy agent",
-        "skills_folder": "website_skills_repo",
-        "skill_count": 18,
-        "core": True,
-    },
-}
+#: Live view of the canonical registry. Kept as a module-level dict that
+#: register_agent() mutates so `from register_agent import AGENT_REGISTRY`
+#: keeps working exactly as before.
+AGENT_REGISTRY: dict[str, dict] = agent_catalog.AGENT_REGISTRY
 
 
 def _load_registry() -> dict:
-    if AGENT_REGISTRY_FILE.is_file():
-        try:
-            import json
-            return json.loads(AGENT_REGISTRY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return dict(AGENT_REGISTRY)
-    return dict(AGENT_REGISTRY)
+    """Read the canonical registry, falling back to the in-memory copy."""
+    reg = agent_catalog.load_registry()
+    if not reg:
+        return dict(AGENT_REGISTRY)
+    return reg
 
 
 def _save_registry(reg: dict) -> None:
-    import json
-    AGENT_REGISTRY_FILE.write_text(
-        json.dumps(reg, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    agent_catalog.save_registry(reg)
 
 
 def register_agent(
@@ -98,12 +81,27 @@ def register_agent(
     source_dir: str | None = None,
     keywords: dict[str, list[str]] | None = None,
     core: bool = False,
+    *,
+    host: str | None = None,
+    implemented: bool | None = None,
+    fanout: bool | None = None,
 ) -> dict:
     """Onboard a new agent with its own repo-local skill brain.
 
     Returns the registry entry for the new agent.
+
+    The persisted file keeps its original flat ``{id: entry}`` shape, so an
+    existing entry is MERGED rather than replaced: re-registering a real agent
+    never wipes the curated `host` / `capabilities` / `module` metadata that
+    agent_catalog's derived views depend on. Pass `host=` / `implemented=` /
+    `fanout=` to override those explicitly; anything left as None keeps its
+    current value (or the placeholder defaults, for a brand-new id).
     """
     name = name.lower().strip()
+    if host is not None and host not in agent_catalog.VALID_HOSTS:
+        raise ValueError(
+            f"host must be one of {agent_catalog.VALID_HOSTS}, got {host!r}"
+        )
     repo_dir = AGENCY_DIR / f"{name}_skills_repo"
     repo_dir.mkdir(parents=True, exist_ok=True)
 
@@ -139,19 +137,42 @@ def register_agent(
     # Generate the *_skills.py loader that uses agent_skill_loader (own folder)
     _generate_skills_module(name, role, skills, keywords or {})
 
-    # Register in the CEO/orchestrator registry (persisted)
+    # Register in the CEO/orchestrator registry (persisted). Merge into any
+    # existing entry so curated metadata survives a re-registration.
     reg = _load_registry()
-    reg[name] = {
+    existing = dict(reg.get(name) or {})
+    entry = dict(agent_catalog._NEW_AGENT_DEFAULTS)
+    entry.update(existing)
+    entry.update({
         "role": role,
         "skills_folder": f"{name}_skills_repo",
         "skill_count": len(skills),
         "core": core,
-    }
+    })
+    # A brand-new scaffold is a placeholder; if it is now being given a real
+    # implementation, that flips the marker and the entry stops being a stub.
+    if implemented is None:
+        implemented = bool(entry.get("implemented") or entry.get("module"))
+    entry["implemented"] = implemented
+    entry["placeholder"] = not implemented
+    if host is not None:
+        entry["host"] = host
+    if fanout is not None:
+        entry["fanout"] = fanout and implemented
+    elif not implemented:
+        entry["fanout"] = False
+
+    reg[name] = entry
     _save_registry(reg)
-    AGENT_REGISTRY[name] = reg[name]
+    # Refresh the in-process copy and every derived view IN PLACE so importers
+    # of AGENT_REGISTRY / DEFAULT_AGENTS / BUILTIN_AGENT_IDS see the new agent
+    # without needing a restart.
+    AGENT_REGISTRY.clear()
+    AGENT_REGISTRY.update(reg)
+    agent_catalog.refresh()
 
     logger.info("Registered agent '%s' with %d skills (folder: %s)", name, len(skills), repo_dir)
-    return reg[name]
+    return entry
 
 
 def _generate_skills_module(name: str, role: str, skills: list[str], keywords: dict) -> None:
@@ -215,5 +236,12 @@ def list_{name}_skills() -> list[dict]:
 
 
 def list_agents() -> dict:
-    """Return the full agent registry (CEO/orchestrator view)."""
+    """Return the full agent registry (CEO/orchestrator view).
+
+    This is the canonical roster: it now includes every real workspace agent
+    (``analyzing`` and ``memory`` used to be missing here, so the CEO could not
+    see or delegate to them). Placeholder scaffolds are included too but carry
+    ``"placeholder": true`` / ``"implemented": false`` — filter with
+    ``agent_catalog.implemented_ids()`` if you need only real agents.
+    """
     return _load_registry()

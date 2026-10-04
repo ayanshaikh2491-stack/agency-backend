@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from admin.persistence import get_workspace_db, row_to_dict
+from admin.workspace.llm_output import unusable_output_reason
 
 logger = logging.getLogger(__name__)
 
@@ -1202,7 +1203,10 @@ class CEOAutonomy:
                     route_to_agent(workspace_id, agent_type, spec, safe_only=True),
                     timeout=self._agent_timeout,
                 )
-                return agent_type, str(out or "")
+                out = str(out or "").strip()
+                if not out:
+                    return agent_type, f"ERROR: {agent_type} agent returned an empty result"
+                return agent_type, out
             except Exception as exc:
                 return agent_type, f"ERROR: {_safe_error(exc)}"
 
@@ -1317,6 +1321,19 @@ class CEOAutonomy:
             except Exception as exc:
                 status = "error"
                 error = _safe_error(exc)
+            # A blank, explicitly failed, or tool-call-shaped result is not a
+            # completed task. Marking it done is how a failed dispatch ended up
+            # stored as a successful task with an empty output.
+            if status == "done":
+                reason = unusable_output_reason(
+                    result, context=f"{agent_type} agent")
+                if reason:
+                    status = "error"
+                    error = reason
+                    logger.warning(
+                        "CEO autonomy task %s marked error, not done: %s",
+                        task_id, reason,
+                    )
             if bus_id:
                 try:
                     from admin.agency.agent_bus import get_bus

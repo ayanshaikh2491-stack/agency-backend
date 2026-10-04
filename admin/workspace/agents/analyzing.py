@@ -30,6 +30,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from admin.config import settings
 from admin.tools.analytics_tools import ANALYTICS_TOOLS, execute_analytics_tool
 from admin.workspace.agent_bus import send_message
+from admin.workspace.llm_output import find_tool_call_markup
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,22 @@ async def analyzing_call_llm(state: AnalyzingAgentState) -> dict[str, Any]:
         return {"messages": new_messages, "error": None}
 
     new_messages.append({"role": "assistant", "content": content})
+    # The model can answer with a tool call written as markup instead of a
+    # structured tool_calls entry (observed in production as an empty
+    # <function_call><list_directory></list_directory> envelope). That is an
+    # unanswered request, not an analysis. Surface it as an error so the router
+    # can retry instead of storing the markup as the agent's output.
+    markup = find_tool_call_markup(content)
+    if markup is not None:
+        logger.warning(
+            "Analyzing Agent returned tool-call markup instead of an answer: %r",
+            markup,
+        )
+        return {
+            "messages": new_messages,
+            "final_output": "",
+            "error": "model returned a tool call instead of an analysis",
+        }
     return {"messages": new_messages, "final_output": content, "error": None}
 
 
@@ -222,6 +239,13 @@ async def analyzing_run_tools(state: AnalyzingAgentState) -> dict[str, Any]:
 
 def analyzing_finalize(state: AnalyzingAgentState) -> dict[str, Any]:
     """Extract final output."""
+    # The error check comes first on purpose. An error means the last LLM turn
+    # produced no usable answer, and the assistant message in `messages` may
+    # still hold the raw markup of a malformed tool call. Reading it as the
+    # answer is exactly the bug this node used to ship.
+    if state.get("error"):
+        return {"final_output": f"Analyzing Agent error: {state['error'][:200]}"}
+
     output = state.get("final_output", "")
     if output:
         return {"final_output": output}
@@ -230,10 +254,16 @@ def analyzing_finalize(state: AnalyzingAgentState) -> dict[str, Any]:
         if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content"):
             return {"final_output": msg["content"]}
 
-    if state.get("error"):
-        return {"final_output": f"Analyzing Agent error: {state['error'][:200]}"}
-
-    return {"final_output": "Analysis complete."}
+    # Nothing usable came back. Say so. Reporting a bare "Analysis complete."
+    # here is what let a failed run be stored as a successful task with an
+    # empty result.
+    logger.warning("Analyzing Agent finished with no output and no error")
+    return {
+        "final_output": (
+            "Analyzing Agent error: the model returned no analysis for this task. "
+            "Nothing was analyzed."
+        )
+    }
 
 
 # ── Graph ────────────────────────────────────────────────────────────────────
@@ -307,7 +337,12 @@ class AnalyzingAgent:
 
         final_output = result.get("final_output", "")
         if not final_output:
-            final_output = result.get("error") or "Analysis complete."
+            # Never invent a success here. finalize already returns an explicit
+            # error string; this is the backstop for a graph that ended early.
+            final_output = result.get("error") or (
+                "Analyzing Agent error: the run produced no analysis."
+            )
+            logger.warning("Analyzing Agent run produced no analysis: %s", final_output[:200])
 
         phases = self._build_thinking_phases(message, final_output, skills or [])
         return final_output, phases

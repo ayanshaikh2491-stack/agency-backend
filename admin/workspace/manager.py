@@ -13,8 +13,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from admin.api.models.schemas import WorkspaceCreate, WorkspaceOut
+from admin.agency.agent_catalog import DEFAULT_AGENTS, domain_agent_classes
 from admin.persistence import get_workspace_db, row_to_dict
 from admin.workspace.agent_bus import _fire_and_forget
+from admin.workspace.llm_output import (
+    MAX_OUTPUT_REPAIRS,
+    TOOL_CALL_REPAIR_HINT,
+    AgentOutputError,
+    require_agent_output,
+    require_output_text,
+    unusable_output_reason,
+)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -65,8 +74,13 @@ def get_agent_activity_log(workspace_id: str, agent_type: str, limit: int = 80) 
                 break
     return out
 
-# Default agent types every workspace gets
-DEFAULT_AGENTS = ["sba", "seo", "content", "website", "ads", "social", "analytics", "analyzing", "memory"]
+# Default agent types every workspace gets.
+# DERIVED, not hardcoded: DEFAULT_AGENTS and domain_agent_classes() come from
+# the canonical admin/agency/agent_registry.json via agent_catalog. This list
+# used to be a literal copy that drifted from the CEO's registry (it is where
+# the extra analyzing/memory agents lived, invisible to the orchestrator).
+# agent_catalog.refresh() mutates DEFAULT_AGENTS in place, so this imported
+# name stays current after register_agent() adds an agent without a restart.
 
 
 def update_agent_activity(workspace_id: str, agent_type: str, status: str, task: str = "") -> None:
@@ -626,14 +640,23 @@ def list_errors(workspace_id: str | None = None, unresolved_only: bool = False) 
 
 async def _call_with_retry(agent, message: str, max_retries: int = 2) -> str:
     """Call agent.chat with async retry + exponential backoff."""
+    agent_name = type(agent).__name__
     last_error: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
             response, _ = await agent.chat(message)
-            return response
+            # A graph that ran but produced nothing usable (blank text, or the
+            # raw markup of a malformed tool call) is a failure, not an answer.
+            # Retry before giving up: a fresh run often produces real output.
+            return require_output_text(
+                response, context=f"{agent_name} chat response")
         except TimeoutError as e:
             last_error = e
             logger.warning("Agent timeout (attempt %d/%d)", attempt + 1, max_retries + 1)
+        except AgentOutputError as e:
+            last_error = e
+            logger.warning("Agent %s returned unusable output (attempt %d/%d): %s",
+                           agent_name, attempt + 1, max_retries + 1, e)
         except Exception as e:
             last_error = e
             logger.warning("Agent error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e)
@@ -734,17 +757,37 @@ async def _route_to_agent_safe(
         f"'{ws.name}' (client: {ws.client_name}). Perform internal analysis only. "
         "Do not call tools, contact anyone, publish content, spend money, or change external state."
     )
-    try:
-        resp = await client.chat.completions.create(
-            model=settings.WORKSPACE_AGENT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": message},
-            ],
-        )
-        return resp.choices[0].message.content or "No response generated."
-    except Exception as exc:
-        return f"{agent_type.upper()} safe analysis failed: {exc}"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": message},
+    ]
+    last_error = ""
+    for attempt in range(MAX_OUTPUT_REPAIRS + 1):
+        try:
+            resp = await client.chat.completions.create(
+                model=settings.WORKSPACE_AGENT_MODEL,
+                messages=messages,
+            )
+            # This path advertises no tools, so any tool-call markup in the
+            # content is an unanswered request, never an analysis result.
+            return require_agent_output(resp, context=f"{agent_type} safe analysis")
+        except AgentOutputError as exc:
+            last_error = str(exc)
+            logger.warning(
+                "%s safe analysis produced unusable output (attempt %d/%d): %s",
+                agent_type, attempt + 1, MAX_OUTPUT_REPAIRS + 1, exc,
+            )
+            messages = messages + [
+                {"role": "user", "content": TOOL_CALL_REPAIR_HINT}
+            ]
+        except Exception as exc:
+            logger.warning("%s safe analysis LLM call failed: %s", agent_type, exc)
+            return f"ERROR: {agent_type.upper()} safe analysis failed: {exc}"
+
+    return (
+        f"ERROR: {agent_type.upper()} safe analysis failed: "
+        f"model returned no usable output ({last_error})"
+    )
 
 
 async def _route_to_agent_raw(
@@ -780,17 +823,12 @@ async def _route_to_agent_raw(
         finally:
             update_agent_activity(workspace_id, "sba", "idle")
 
-    # Domain-specific workspace agents (LangGraph-powered)
-    _domain_agents = {
-        "seo": ("admin.workspace.agents.seo", "SEOAgent"),
-        "ads": ("admin.workspace.agents.ads", "AdsAgent"),
-        "website": ("admin.workspace.agents.website", "WebsiteAgent"),
-        "social": ("admin.workspace.agents.social", "SocialAgent"),
-        "content": ("admin.workspace.agents.content", "ContentAgent"),
-        "analytics": ("admin.workspace.agents.analytics", "AnalyticsAgent"),
-        "analyzing": ("admin.workspace.agents.analyzing", "AnalyzingAgent"),
-        "memory": ("admin.workspace.agents.memory", "MemoryAgent"),
-    }
+    # Domain-specific workspace agents (LangGraph-powered).
+    # DERIVED from admin/agency/agent_registry.json — this map used to be a
+    # hardcoded literal that had to be edited by hand every time an agent was
+    # added. SBA is intentionally absent: it is handled on the separate path
+    # above and agent_catalog.domain_agent_classes() skips it.
+    _domain_agents = domain_agent_classes()
 
     if agent_type in _domain_agents:
         module_path, class_name = _domain_agents[agent_type]
@@ -897,17 +935,35 @@ async def _route_to_agent_raw(
         f"You are a specialist in your domain. Respond helpfully and concisely."
     )
 
-    try:
-        resp = await client.chat.completions.create(
-            model=settings.WORKSPACE_AGENT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": message},
-            ],
-        )
-        return resp.choices[0].message.content or "No response generated."
-    except Exception as exc:
-        return f"{agent_type.upper()} agent LLM call failed: {exc}"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": message},
+    ]
+    last_error = ""
+    for attempt in range(MAX_OUTPUT_REPAIRS + 1):
+        try:
+            resp = await client.chat.completions.create(
+                model=settings.WORKSPACE_AGENT_MODEL,
+                messages=messages,
+            )
+            return require_agent_output(resp, context=f"{agent_type} generic agent")
+        except AgentOutputError as exc:
+            last_error = str(exc)
+            logger.warning(
+                "%s generic agent produced unusable output (attempt %d/%d): %s",
+                agent_type, attempt + 1, MAX_OUTPUT_REPAIRS + 1, exc,
+            )
+            messages = messages + [
+                {"role": "user", "content": TOOL_CALL_REPAIR_HINT}
+            ]
+        except Exception as exc:
+            logger.warning("%s generic agent LLM call failed: %s", agent_type, exc)
+            return f"ERROR: {agent_type.upper()} agent LLM call failed: {exc}"
+
+    return (
+        f"ERROR: {agent_type.upper()} agent LLM call failed: "
+        f"model returned no usable output ({last_error})"
+    )
 
 
 # ── Load from SQLite on startup ───────────────────────────────────────────────
@@ -1017,6 +1073,15 @@ async def process_agent_task_queue() -> None:
                 status, result_text, error = "done", str(result or ""), ""
             except Exception as e:
                 status, result_text, error = "error", "", str(e)
+            # A blank or failed agent result is not a completed task.
+            reason = unusable_output_reason(
+                result_text, context=f"{task['agent_type']} agent")
+            if status == "done" and reason:
+                status, error = "error", reason
+                logger.warning(
+                    "Queued agent task %s marked error, not done: %s",
+                    task_id, reason,
+                )
             
             # Save result
             await db.execute(
@@ -1085,8 +1150,17 @@ async def process_handoff_queue() -> None:
                 for agent, result in zip(agents, results):
                     if isinstance(result, Exception):
                         result_dict[agent] = f"ERROR: {result}"
+                        continue
+                    text = str(result or "").strip()
+                    # An empty or tool-call-shaped result is a failed leg, not
+                    # a delivered one. Recording it as a plain string is how a
+                    # broken fan-out reported success.
+                    reason = unusable_output_reason(text, context=f"{agent} agent")
+                    if reason:
+                        logger.warning("Handoff delivery %s: %s", handoff["id"], reason)
+                        result_dict[agent] = f"ERROR: {reason}"
                     else:
-                        result_dict[agent] = str(result or "")
+                        result_dict[agent] = text
                 
                 # Mark done
                 await db.execute(
