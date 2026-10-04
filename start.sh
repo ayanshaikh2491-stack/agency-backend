@@ -18,9 +18,19 @@ CUSTOM_ENDPOINTS_JSON="${CUSTOM_ENDPOINTS_JSON:-}"  # custom OpenAI-compatible p
 
 # ── DB restore from GitHub data branch (before node boots: freeapi.db must
 # exist before the FreeLLMAPI server first-open/migrates a fresh one) ─────────
-if [ -n "$GH_BACKUP_TOKEN" ]; then
+# GH_BACKUP_TOKEN must stay defaulted. Under `set -u` a bare $GH_BACKUP_TOKEN
+# is fatal, and this script runs with set -u on line 4: the whole container
+# exited with status 1 at boot, taking the API and the gateway down with it,
+# because one OPTIONAL feature's credential was absent. Every other env var
+# here already carries a :- default; this one did not. A missing backup token
+# must degrade to "no backups", never to "no service".
+if [ -n "${GH_BACKUP_TOKEN:-}" ]; then
   echo "[start] restoring DBs from backup branch"
   python -m admin.db_backup restore || echo "[start] WARN: db restore failed (boot continues)"
+else
+  echo "[start] WARN: GH_BACKUP_TOKEN unset - DB backups off, and any previously"
+  echo "[start]       backed-up data (LLM provider keys, unified key) is NOT restored."
+  echo "[start]       The gateway will start with an empty database."
 fi
 
 echo "[start] booting FreeLLMAPI on internal port $FREEAPI_PORT"
@@ -177,7 +187,9 @@ for s in seeds:
 echo "[start] CEO schedule seed started (background)"
 
 # ── Periodic DB backup to GitHub data branch (every 20 min) ──────────────────
-if [ -n "$GH_BACKUP_TOKEN" ]; then
+# Same reasoning as the restore above: default it, or an unset backup token is
+# a fatal error rather than a disabled feature.
+if [ -n "${GH_BACKUP_TOKEN:-}" ]; then
   (
     while true; do
       sleep 1200
