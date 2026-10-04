@@ -2,6 +2,7 @@
 
 Endpoints:
   GET /api/status                — Agency pipeline summary (dashboard)
+  GET /api/status/db             - Which store the CEO's memory lives in
   GET /api/social/tokens/status  — Connected social platform accounts
 """
 from __future__ import annotations
@@ -70,6 +71,7 @@ async def api_status() -> dict[str, Any]:
     return {
         "success": True,
         **guards,
+        "storage": _storage_info(),
         "pipeline": {
             "leads_found_today": new_count,
             "queue": {"total": total_in_pipeline, "new": new_count},
@@ -78,6 +80,33 @@ async def api_status() -> dict[str, Any]:
         },
         "workspaces": workspace_count,
     }
+
+
+def _storage_info() -> dict[str, Any]:
+    """Report which store the workspace/CEO memory lives in.
+
+    This must never raise. The whole point of the endpoint is to tell an
+    operator whether the deployment is pointed at Turso or at an ephemeral
+    local file, and a broken status page hides that instead of showing it.
+    """
+    try:
+        from admin.persistence import backend_info
+
+        return backend_info()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("storage status unavailable: %s", exc)
+        return {"kind": "unknown", "error": str(exc)[:200]}
+
+
+@router.get("/api/status/db", tags=["system"])
+async def api_status_db() -> dict[str, Any]:
+    """Which backend is serving the workspace store, and is it durable.
+
+    `durable: false` means the CEO's memory is in a local SQLite file. On
+    Render's free plan that file is deleted on every redeploy, which is the
+    bug this endpoint exists to make visible.
+    """
+    return {"success": True, "storage": _storage_info()}
 
 
 @router.get("/api/social/tokens/status")

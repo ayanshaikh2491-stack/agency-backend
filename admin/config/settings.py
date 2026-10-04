@@ -69,8 +69,19 @@ TURSO_AUTH_TOKEN: str = os.getenv("TURSO_AUTH_TOKEN", "")
 
 # Build DATABASE_URL based on available configuration
 if TURSO_DATABASE_URL and TURSO_AUTH_TOKEN:
-    # Turso libSQL database
-    DATABASE_URL = f"sqlite+libsql://{TURSO_DATABASE_URL}?authToken={TURSO_AUTH_TOKEN}"
+    # Turso libSQL database.
+    #
+    # The host must sit in the SQLAlchemy authority. The older form,
+    # f"sqlite+libsql://{TURSO_DATABASE_URL}?authToken=...", produces
+    # "sqlite+libsql://libsql://my-db.turso.io?authToken=..." because
+    # TURSO_DATABASE_URL already carries its own scheme, and
+    # sqlalchemy.engine.make_url rejects that outright with
+    # "invalid literal for int() with base 10: ''". admin/database.py builds
+    # its engine from this at module scope, so the old shape killed the whole
+    # backend the moment TURSO_* was set. That is the most likely reason those
+    # variables stayed empty on Render.
+    _turso_host = TURSO_DATABASE_URL.split("://", 1)[-1].split("/", 1)[0]
+    DATABASE_URL = f"sqlite+libsql://{_turso_host}?authToken={TURSO_AUTH_TOKEN}"
 elif os.getenv("RENDER_POSTGRES_URL"):
     # Render PostgreSQL (when deployed on Render)
     DATABASE_URL = os.getenv("RENDER_POSTGRES_URL")
@@ -80,6 +91,30 @@ else:
         "DATABASE_URL",
         "sqlite+aiosqlite:///./tags_agency.db",
     )
+
+# ── Workspace store backend (admin/persistence.py) ──────────────────────────
+# The CEO brain/memory store. Values:
+#   "auto"   -> Turso/libSQL when TURSO_DATABASE_URL is set, local SQLite
+#               otherwise. This is the default, and it is what keeps local dev
+#               at zero configuration.
+#   "turso"  -> demand Turso. Boot fails if TURSO_DATABASE_URL is missing.
+#               Use this on Render so a forgotten env var is a crash, not a
+#               silent fall back to a file the next deploy deletes.
+#   "sqlite" -> pin the local file even when TURSO_* is set. Dev only.
+WORKSPACE_DB_BACKEND: str = (
+    os.getenv("AGENCY_WORKSPACE_DB_BACKEND", "auto").strip().lower() or "auto"
+)
+
+# Local SQLite file used when WORKSPACE_DB_BACKEND resolves to "sqlite".
+# Empty means "the repository default", which lives on an ephemeral disk when
+# this backend runs on Render's free plan.
+WORKSPACE_DB_SQLITE_PATH: str = os.getenv("AGENCY_WORKSPACE_DB_PATH", "").strip()
+
+# Full dialect URL override for the workspace store. Normally built from
+# TURSO_DATABASE_URL + TURSO_AUTH_TOKEN. Set this only if your libSQL driver
+# expects a different URL shape than the one built here; the effective URL is
+# logged (token redacted) at boot so a mismatch is visible immediately.
+WORKSPACE_DB_URL: str = os.getenv("AGENCY_WORKSPACE_DB_URL", "").strip()
 
 
 # ── Multi‑phase thinking loop steps ───────────────────────────────────────
