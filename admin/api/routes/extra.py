@@ -86,8 +86,9 @@ def _storage_info() -> dict[str, Any]:
     """Report which store the workspace/CEO memory lives in.
 
     This must never raise. The whole point of the endpoint is to tell an
-    operator whether the deployment is pointed at Turso or at an ephemeral
-    local file, and a broken status page hides that instead of showing it.
+    operator whether the deployment is pointed at Cloudflare D1, at Turso or
+    at an ephemeral local file, and a broken status page hides that instead of
+    showing it. The shape comes straight from persistence.backend_info().
     """
     try:
         from admin.persistence import backend_info
@@ -105,6 +106,18 @@ async def api_status_db() -> dict[str, Any]:
     `durable: false` means the CEO's memory is in a local SQLite file. On
     Render's free plan that file is deleted on every redeploy, which is the
     bug this endpoint exists to make visible.
+
+    A healthy Cloudflare D1 deployment answers:
+
+        {"success": true, "storage": {"kind": "d1", "durable": true, ...}}
+
+    `storage.d1_configured` is a separate signal and is the one to read when
+    `kind` is still "uninitialised": it says whether the three
+    AGENCY_WORKSPACE_DB_D1_* variables are all present, so "configured but
+    never connected" is distinguishable from "not configured at all". On D1,
+    `storage.transactions` reads
+    "per-statement, no cross-request transaction", which is the honest
+    description of what `await db.commit()` does there: nothing.
     """
     return {"success": True, "storage": _storage_info()}
 
