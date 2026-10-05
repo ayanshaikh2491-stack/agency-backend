@@ -163,6 +163,57 @@ def _json_loads(value: str | None, default: Any = None) -> Any:
     return _safe_value(parsed)
 
 
+def _extract_json_object(text: str | None) -> dict[str, Any] | None:
+    """Pull the first complete JSON object out of a model reply.
+
+    The previous approach was content.find("{") to content.rfind("}"). That
+    fails on the replies we now actually get: a fenced block whose prose
+    mentions a brace before the object, a trailing brace in a sentence, or a
+    chatty model that never emits an object at all. Scanning for the first
+    balanced object, while tracking string literals and escapes, handles the
+    fence and the trailing prose; returning None for genuinely absent JSON lets
+    the caller retry instead of silently acting on {}.
+    """
+    if not text:
+        return None
+    candidates: list[str] = []
+
+    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.DOTALL | re.IGNORECASE)
+    if fence:
+        candidates.append(fence.group(1))
+    candidates.append(text)
+
+    for blob in candidates:
+        start = blob.find("{")
+        while start >= 0:
+            depth = 0
+            in_string = False
+            escaped = False
+            for index in range(start, len(blob)):
+                char = blob[index]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        parsed = _json_loads(blob[start:index + 1], default=None)
+                        if isinstance(parsed, dict) and parsed:
+                            return parsed
+                        break
+            start = blob.find("{", start + 1)
+    return None
+
+
 def _default_state() -> dict[str, Any]:
     return {
         "running": False,
@@ -875,31 +926,49 @@ class CEOAutonomy:
             import httpx
 
             timeout = float(os.getenv("AGENCY_CEO_THINK_TIMEOUT_SEC", "60"))
-            resp = httpx.post(
-                base.rstrip("/") + "/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": settings.WORKSPACE_AGENT_MODEL or "auto",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 400,
-                    "temperature": 0.4,
-                },
-                timeout=timeout,
-            )
-            if resp.status_code != 200:
+            last_content = {"text": ""}
+
+            def _call(messages):
+                resp = httpx.post(
+                    base.rstrip("/") + "/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={
+                        "model": settings.WORKSPACE_AGENT_MODEL or "auto",
+                        "messages": messages,
+                        "max_tokens": 400,
+                        "temperature": 0.4,
+                    },
+                    timeout=timeout,
+                )
+                if resp.status_code != 200:
+                    return None, f"HTTP {resp.status_code}"
+                content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+                last_content["text"] = content
+                found = _extract_json_object(content)
+                return (found, None) if found else (None, "no JSON object")
+
+            parsed, why = _call([{"role": "user", "content": prompt}])
+            if parsed is None:
+                # Free routers serve small chatty models, and a cheap model
+                # narrating ("The user is simply asking me to say...") is a
+                # normal outcome, not a fault. Ask once more, handing back the
+                # offending text so the model has something concrete to fix,
+                # and ask for the bare object with no fence.
+                logger.info("CEO thinker first attempt unusable (%s); retrying", why)
+                parsed, why = _call([
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": last_content["text"]},
+                    {"role": "user", "content":
+                        "That was not valid JSON. Reply with the JSON object alone. "
+                        "No prose, no explanation, no markdown fence. It must "
+                        "start with { and end with }."},
+                ])
+            if parsed is None:
                 return {
                     "action": "observe",
-                    "rationale": f"CEO thinker returned HTTP {resp.status_code}",
+                    "rationale": f"CEO thinker returned {why}",
                     "result": {"overview": summary},
                 }
-            content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
-            # Models often wrap JSON in a fence or add a sentence. Take the
-            # outermost object rather than trusting the whole string.
-            start, end = content.find("{"), content.rfind("}")
-            if start < 0 or end <= start:
-                return {"action": "observe", "rationale": "CEO thinker returned no JSON object",
-                        "result": {"overview": summary}}
-            parsed = _json_loads(content[start:end + 1], default={}) or {}
         except asyncio.CancelledError:
             raise
         except Exception as exc:
