@@ -935,7 +935,13 @@ class CEOAutonomy:
                     json={
                         "model": settings.WORKSPACE_AGENT_MODEL or "auto",
                         "messages": messages,
-                        "max_tokens": 400,
+                        # Free routers serve small chatty models. At 400 tokens a
+                        # model restating the brief ("The user wants me to act
+                        # as a CEO...") runs out of budget before the JSON
+                        # arrives, and finish_reason comes back "length" with
+                        # nothing parseable. Measured against the live gateway:
+                        # 400 tokens truncated, 1000 gave 5 of 5 clean JSON.
+                        "max_tokens": int(os.getenv("AGENCY_CEO_THINK_MAX_TOKENS", "1000")),
                         "temperature": 0.4,
                     },
                     timeout=timeout,
