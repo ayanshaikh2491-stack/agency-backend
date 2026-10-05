@@ -14,6 +14,15 @@ from typing import Any
 
 from admin.api.models.schemas import WorkspaceCreate, WorkspaceOut
 from admin.agency.agent_catalog import DEFAULT_AGENTS, domain_agent_classes
+from admin.llm_throttle import (
+    LLMGuardError,
+    circuit_open as llm_circuit_open,
+    guard as llm_guard,
+    is_rate_limit_error as llm_is_rate_limit,
+    record_rate_limit as llm_record_rate_limit,
+    record_success as llm_record_success,
+    retry_after_hint as llm_429_backoff_hint,
+)
 from admin.persistence import get_workspace_db, row_to_dict
 from admin.workspace.agent_bus import _fire_and_forget
 from admin.workspace.llm_output import (
@@ -639,17 +648,38 @@ def list_errors(workspace_id: str | None = None, unresolved_only: bool = False) 
 # ── Agent Routing ────────────────────────────────────────────────────────────
 
 async def _call_with_retry(agent, message: str, max_retries: int = 2) -> str:
-    """Call agent.chat with async retry + exponential backoff."""
+    """Call agent.chat with async retry + exponential backoff.
+
+    429 is NOT a transient fault and must not be retried like one. Retrying a
+    rate-limited call immediately extends the throttle, which is how the free
+    tier got hammered into a permanent 429. So a 429 is registered with the
+    shared breaker and the next attempt waits for the breaker's window, or
+    gives up immediately if the breaker is already open.
+
+    A refusal from the guard (circuit open, no concurrency slot) is re-raised
+    straight away: waiting cannot help, and returning anything shaped like an
+    answer would turn a throttled agent into a fake success.
+    """
     agent_name = type(agent).__name__
     last_error: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            response, _ = await agent.chat(message)
+            # One concurrency slot for the whole agent turn. The slot is held
+            # across every LLM call the agent makes, not just this one.
+            async with llm_guard():
+                response, _ = await agent.chat(message)
+            llm_record_success()
             # A graph that ran but produced nothing usable (blank text, or the
             # raw markup of a malformed tool call) is a failure, not an answer.
             # Retry before giving up: a fresh run often produces real output.
             return require_output_text(
                 response, context=f"{agent_name} chat response")
+        except LLMGuardError as e:
+            # Circuit open or the concurrency queue timed out. Both are local
+            # refusals: there is no point spending another attempt.
+            logger.warning("Agent %s refused by LLM guard (attempt %d/%d): %s",
+                           agent_name, attempt + 1, max_retries + 1, e)
+            raise
         except TimeoutError as e:
             last_error = e
             logger.warning("Agent timeout (attempt %d/%d)", attempt + 1, max_retries + 1)
@@ -659,6 +689,33 @@ async def _call_with_retry(agent, message: str, max_retries: int = 2) -> str:
                            agent_name, attempt + 1, max_retries + 1, e)
         except Exception as e:
             last_error = e
+            if llm_is_rate_limit(e):
+                # Count it against the breaker and wait out the window instead
+                # of hammering a throttled upstream.
+                llm_record_rate_limit(e)
+                wait = llm_429_backoff_hint(e)
+                if attempt >= max_retries:
+                    logger.warning(
+                        "Agent %s rate limited by upstream (attempt %d/%d, last "
+                        "attempt): %s", agent_name, attempt + 1, max_retries + 1, e)
+                    continue
+                if llm_circuit_open():
+                    # The breaker is holding traffic back on purpose. Another
+                    # attempt inside this call would defeat it.
+                    logger.warning(
+                        "Agent %s rate limited by upstream (attempt %d/%d): %s - "
+                        "LLM circuit is open, not retrying", agent_name,
+                        attempt + 1, max_retries + 1, e)
+                    raise LLMGuardError(
+                        f"{agent_name} rate limited ({e}); LLM circuit is open, "
+                        f"not retrying - retry after the breaker closes"
+                    ) from e
+                logger.warning(
+                    "Agent %s rate limited by upstream (attempt %d/%d): %s - "
+                    "waiting %.0fs before the next attempt",
+                    agent_name, attempt + 1, max_retries + 1, e, wait)
+                await asyncio.sleep(wait)
+                continue
             logger.warning("Agent error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e)
 
         if attempt < max_retries:
@@ -764,13 +821,21 @@ async def _route_to_agent_safe(
     last_error = ""
     for attempt in range(MAX_OUTPUT_REPAIRS + 1):
         try:
-            resp = await client.chat.completions.create(
-                model=settings.WORKSPACE_AGENT_MODEL,
-                messages=messages,
-            )
+            async with llm_guard():
+                resp = await client.chat.completions.create(
+                    model=settings.WORKSPACE_AGENT_MODEL,
+                    messages=messages,
+                )
+            llm_record_success()
             # This path advertises no tools, so any tool-call markup in the
             # content is an unanswered request, never an analysis result.
             return require_agent_output(resp, context=f"{agent_type} safe analysis")
+        except LLMGuardError as exc:
+            # Refused locally: the circuit is open or every concurrency slot is
+            # taken. No upstream request was made, so there is nothing to fix
+            # by retrying inside this call. Surfaced as an explicit failure.
+            logger.warning("%s safe analysis blocked by LLM guard: %s", agent_type, exc)
+            return f"ERROR: {agent_type.upper()} safe analysis blocked: {exc}"
         except AgentOutputError as exc:
             last_error = str(exc)
             logger.warning(
@@ -781,6 +846,8 @@ async def _route_to_agent_safe(
                 {"role": "user", "content": TOOL_CALL_REPAIR_HINT}
             ]
         except Exception as exc:
+            if llm_is_rate_limit(exc):
+                llm_record_rate_limit(exc)
             logger.warning("%s safe analysis LLM call failed: %s", agent_type, exc)
             return f"ERROR: {agent_type.upper()} safe analysis failed: {exc}"
 
@@ -942,11 +1009,16 @@ async def _route_to_agent_raw(
     last_error = ""
     for attempt in range(MAX_OUTPUT_REPAIRS + 1):
         try:
-            resp = await client.chat.completions.create(
-                model=settings.WORKSPACE_AGENT_MODEL,
-                messages=messages,
-            )
+            async with llm_guard():
+                resp = await client.chat.completions.create(
+                    model=settings.WORKSPACE_AGENT_MODEL,
+                    messages=messages,
+                )
+            llm_record_success()
             return require_agent_output(resp, context=f"{agent_type} generic agent")
+        except LLMGuardError as exc:
+            logger.warning("%s generic agent blocked by LLM guard: %s", agent_type, exc)
+            return f"ERROR: {agent_type.upper()} agent LLM call blocked: {exc}"
         except AgentOutputError as exc:
             last_error = str(exc)
             logger.warning(
@@ -957,6 +1029,8 @@ async def _route_to_agent_raw(
                 {"role": "user", "content": TOOL_CALL_REPAIR_HINT}
             ]
         except Exception as exc:
+            if llm_is_rate_limit(exc):
+                llm_record_rate_limit(exc)
             logger.warning("%s generic agent LLM call failed: %s", agent_type, exc)
             return f"ERROR: {agent_type.upper()} agent LLM call failed: {exc}"
 

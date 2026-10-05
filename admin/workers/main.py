@@ -40,8 +40,21 @@ the ceo_autonomy_* tables did not exist. Every autonomy query then raised, and
 each raise was swallowed at logger.debug underneath a logger configured at
 INFO -- so the loop reported {'status': 'ok', 'claimed': 0} forever while doing
 nothing, and no endpoint could tell an operator that.
+
+WHY THE BOOT BURST IS STAGGERED
+-------------------------------
+Every loop used to be handed to asyncio.gather with no offset, so on each
+deploy all six started inside the same event-loop iteration. The CEO autonomy
+tick, the CEO scheduler and the two queue drainers then all reached the LLM
+gateway together, and the production log showed three or four agents hitting
+HTTP 429 inside a single second. Staggering the starts by a small
+deterministic per-worker offset spreads that burst across the first few
+seconds. The offset is derived from a hash of the worker name, not from
+random(), so a restart reproduces the same schedule and the behaviour is
+testable. Set AGENCY_BOOT_STAGGER_SEC=0 to start them together.
 """
 import asyncio
+import hashlib
 import logging
 import os
 
@@ -68,6 +81,27 @@ logger = logging.getLogger(__name__)
 # A crashed loop should not hot-loop, but should also come back quickly.
 _MIN_BACKOFF = 5.0
 _MAX_BACKOFF = 300.0
+
+# Seconds of spread across the boot burst. Each worker waits
+# BOOT_STAGGER_SEC * (index + jitter) before its first start(), so six loops
+# spread over roughly 0 .. 6 * BOOT_STAGGER_SEC seconds instead of landing in
+# the same instant. 0 disables the stagger entirely.
+BOOT_STAGGER_SEC = max(0.0, float(os.getenv("AGENCY_BOOT_STAGGER_SEC", "2.5")))
+
+
+def boot_offset(name: str, index: int) -> float:
+    """Deterministic per-worker start offset, in seconds.
+
+    The jitter comes from a hash of the worker name rather than random(), so
+    the same container always staggers the same way. That makes the boot order
+    reproducible in a test and keeps a restart from reshuffling which loop
+    happens to go first.
+    """
+    if BOOT_STAGGER_SEC <= 0:
+        return 0.0
+    digest = hashlib.sha256(name.encode("utf-8")).digest()
+    jitter = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF
+    return round(BOOT_STAGGER_SEC * (index + jitter), 3)
 
 # Tables that must exist before the 24/7 loops are allowed to start.
 _REQUIRED_TABLES = (
@@ -124,6 +158,7 @@ async def _boot_databases() -> None:
 
 
 async def _supervise(name: str, start, get_task=None, *,
+                     start_delay: float = 0.0,
                      min_backoff: float = _MIN_BACKOFF,
                      max_backoff: float = _MAX_BACKOFF) -> None:
     """Run a 24/7 loop forever, restarting it with capped exponential backoff.
@@ -132,7 +167,14 @@ async def _supervise(name: str, start, get_task=None, *,
     given -- spawns the loop's task internally and returns. We await the real
     task, never the spawn call, so a crash in the loop itself triggers a
     restart rather than a spawn that returns instantly.
+
+    `start_delay` is applied once, before the first start(), so the loops do
+    not all wake the LLM gateway in the same event-loop iteration. Restarts are
+    not delayed: they already wait out `min_backoff`.
     """
+    if start_delay > 0:
+        logger.info("⏱ %s starts in %.1fs (boot stagger)", name, start_delay)
+        await asyncio.sleep(start_delay)
     delay = min_backoff
     while True:
         try:
@@ -168,6 +210,18 @@ async def main() -> None:
     logger.info("   DATABASE_URL dialect in use: %s",
                 getattr(settings, "DATABASE_URL", "<unset>").split(":", 1)[0])
 
+    # The LLM guards were only ever installed by the web service lifespan in
+    # admin/main.py. This worker process is where the CEO autonomy loop, the
+    # scheduler and the queue drainers actually call the gateway, so without
+    # this the RPM cap, the circuit breaker and usage accounting were all absent
+    # from the process doing most of the calling.
+    try:
+        from admin.llm_throttle import install as install_llm_throttle
+
+        install_llm_throttle()
+    except Exception as exc:
+        logger.warning("LLM guards not installed in the worker: %s", exc)
+
     # Tables first. If this raises, the process exits and Render restarts it --
     # which is the intended, visible failure.
     await _boot_databases()
@@ -196,9 +250,12 @@ async def main() -> None:
     ]
 
     # gather here is only over supervisors, which by construction never raise
-    # (except CancelledError, which should stop everything).
+    # (except CancelledError, which should stop everything). Each supervisor
+    # waits its own deterministic offset first, so the boot burst is spread out
+    # instead of six loops reaching the LLM gateway in the same instant.
     await asyncio.gather(
-        *(_supervise(name, start, get_task) for name, start, get_task in workers)
+        *(_supervise(name, start, get_task, start_delay=boot_offset(name, i))
+          for i, (name, start, get_task) in enumerate(workers))
     )
 
 

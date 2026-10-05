@@ -18,6 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from admin.llm_throttle import (
+    circuit_open as llm_circuit_open,
+    circuit_retry_after as llm_retry_after,
+    guard as llm_guard,
+    record_rate_limit as llm_record_rate_limit,
+    record_success as llm_record_success,
+    snapshot as llm_guard_snapshot,
+)
 from admin.persistence import get_workspace_db, row_to_dict
 from admin.workspace.llm_output import unusable_output_reason
 
@@ -907,6 +915,22 @@ class CEOAutonomy:
                 "result": {"overview": summary},
             }
 
+        # An open breaker means the gateway is throttling us. Spending a call
+        # here would be refused locally anyway, so degrade to observe and say
+        # why, rather than retrying into the throttle that caused it.
+        if llm_circuit_open():
+            wait = llm_retry_after()
+            logger.warning(
+                "CEO thinker skipped: LLM circuit open for another %.0fs", wait)
+            return {
+                "action": "observe",
+                "rationale": (
+                    "LLM gateway is rate limiting the agency; the thinker was "
+                    f"skipped for another {wait:.0f}s while the circuit is open."
+                ),
+                "result": {"overview": summary},
+            }
+
         prompt = (
             _load_ceo_playbook()
             + "\n\n---\n\n"
@@ -928,40 +952,52 @@ class CEOAutonomy:
             timeout = float(os.getenv("AGENCY_CEO_THINK_TIMEOUT_SEC", "60"))
             last_content = {"text": ""}
 
-            def _call(messages):
-                resp = httpx.post(
-                    base.rstrip("/") + "/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={
-                        "model": settings.WORKSPACE_AGENT_MODEL or "auto",
-                        "messages": messages,
-                        # Free routers serve small chatty models. At 400 tokens a
-                        # model restating the brief ("The user wants me to act
-                        # as a CEO...") runs out of budget before the JSON
-                        # arrives, and finish_reason comes back "length" with
-                        # nothing parseable. Measured against the live gateway:
-                        # 400 tokens truncated, 1000 gave 5 of 5 clean JSON.
-                        "max_tokens": int(os.getenv("AGENCY_CEO_THINK_MAX_TOKENS", "1000")),
-                        "temperature": 0.4,
-                    },
-                    timeout=timeout,
-                )
+            async def _call(messages):
+                # One concurrency slot per upstream call. Without it the thinker
+                # and a fan-out of agent calls enter the gateway in the same
+                # instant, which is what earns the 429.
+                async with llm_guard():
+                    resp = httpx.post(
+                        base.rstrip("/") + "/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={
+                            "model": settings.WORKSPACE_AGENT_MODEL or "auto",
+                            "messages": messages,
+                            # Free routers serve small chatty models. At 400 tokens a
+                            # model restating the brief ("The user wants me to act
+                            # as a CEO...") runs out of budget before the JSON
+                            # arrives, and finish_reason comes back "length" with
+                            # nothing parseable. Measured against the live gateway:
+                            # 400 tokens truncated, 1000 gave 5 of 5 clean JSON.
+                            "max_tokens": int(os.getenv("AGENCY_CEO_THINK_MAX_TOKENS", "1000")),
+                            "temperature": 0.4,
+                        },
+                        timeout=timeout,
+                    )
+                if resp.status_code == 429:
+                    # Register the throttle before deciding what to do next, so
+                    # the breaker reflects it even if this attempt gives up.
+                    llm_record_rate_limit(
+                        RuntimeError(f"HTTP 429 from {base} (Retry-After="
+                                     f"{resp.headers.get('retry-after')})"))
+                    return None, "HTTP 429"
                 if resp.status_code != 200:
                     return None, f"HTTP {resp.status_code}"
+                llm_record_success()
                 content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
                 last_content["text"] = content
                 found = _extract_json_object(content)
                 return (found, None) if found else (None, "no JSON object")
 
-            parsed, why = _call([{"role": "user", "content": prompt}])
-            if parsed is None:
+            parsed, why = await _call([{"role": "user", "content": prompt}])
+            if parsed is None and why != "HTTP 429":
                 # Free routers serve small chatty models, and a cheap model
                 # narrating ("The user is simply asking me to say...") is a
                 # normal outcome, not a fault. Ask once more, handing back the
                 # offending text so the model has something concrete to fix,
                 # and ask for the bare object with no fence.
                 logger.info("CEO thinker first attempt unusable (%s); retrying", why)
-                parsed, why = _call([
+                parsed, why = await _call([
                     {"role": "user", "content": prompt},
                     {"role": "assistant", "content": last_content["text"]},
                     {"role": "user", "content":
@@ -970,6 +1006,11 @@ class CEOAutonomy:
                         "start with { and end with }."},
                 ])
             if parsed is None:
+                if why == "HTTP 429":
+                    # Do NOT spend a second call here: the upstream is already
+                    # throttling us and the breaker is now open. Say so.
+                    logger.warning(
+                        "CEO thinker rate limited upstream; breaker open, no second attempt")
                 return {
                     "action": "observe",
                     "rationale": f"CEO thinker returned {why}",
@@ -1497,6 +1538,14 @@ class CEOAutonomy:
         except Exception:  # noqa: BLE001
             thinker_ok = False
         state["thinker_configured"] = thinker_ok
+        # An agency that is being rate limited and one that is merely idle look
+        # identical from the outside. Surface the breaker so /status says which.
+        try:
+            state["llm_guards"] = llm_guard_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            # Never let a status field crash the status call itself.
+            state["llm_guards"] = {"error": _safe_error(exc)}
+            logger.warning("LLM guard snapshot failed: %s", _safe_error(exc))
         return _safe_value(state)
 
 
