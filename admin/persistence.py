@@ -60,6 +60,7 @@ will delete. See _open_turso() and _open_d1().
 """
 
 import asyncio
+import base64
 import datetime as _dt
 import json
 import logging
@@ -69,6 +70,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import aiosqlite
+import httpx
 
 from admin.config import settings
 
@@ -1742,28 +1744,41 @@ async def _open_d1(cfg: dict[str, str] | None = None) -> _D1Backend:
         endpoint, cfg["token"], client=client, timeout=timeout, max_retries=retries,
     )
 
-    try:
-        await backend.execute("SELECT 1", ())
-    except _D1Error as exc:
-        # Close the client opened by the probe so a failed boot does not leak
-        # a connection pool into the process that is about to die.
+    # Boot probe with retries: network blips between Render and Cloudflare are
+    # common. Retry up to 3 times with exponential backoff (1s, 2s, 4s).
+    probe_retries = 3
+    probe_base_delay = 1.0
+    for attempt in range(probe_retries):
         try:
-            await backend.close()
-        except Exception as close_exc:  # noqa: BLE001
-            logger.warning(
-                "Could not close the D1 client after a failed boot probe: %s",
-                close_exc,
-            )
-        raise RuntimeError(
-            f"Cannot reach Cloudflare D1 at {redact_url(endpoint)}: {exc}. "
-            f"Refusing to fall back to a local SQLite file at {DB_PATH}: on an "
-            "ephemeral disk (Render FREE) that file is deleted on the next "
-            "deploy, so the CEO would silently restart from an empty database. "
-            "Check AGENCY_WORKSPACE_DB_D1_TOKEN (it needs the D1 Edit "
-            "permission on the account), AGENCY_WORKSPACE_DB_D1_ACCOUNT_ID and "
-            "AGENCY_WORKSPACE_DB_D1_DATABASE_ID, or unset them deliberately to "
-            "run against local SQLite."
-        ) from exc
+            await backend.execute("SELECT 1", ())
+            break
+        except _D1Error as exc:
+            if attempt == probe_retries - 1:
+                try:
+                    await backend.close()
+                except Exception as close_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Could not close the D1 client after a failed boot probe: %s",
+                        close_exc,
+                    )
+                raise RuntimeError(
+                    f"Cannot reach Cloudflare D1 at {redact_url(endpoint)} after "
+                    f"{probe_retries} attempts: {exc}. Refusing "
+                    f"to fall back to a local SQLite file at {DB_PATH}: on an "
+                    "ephemeral disk (Render FREE) that file is deleted on the next "
+                    "deploy, so the CEO would silently restart from an empty database. "
+                    "Check AGENCY_WORKSPACE_DB_D1_TOKEN (it needs the D1 Edit "
+                    "permission on the account), AGENCY_WORKSPACE_DB_D1_ACCOUNT_ID and "
+                    "AGENCY_WORKSPACE_DB_D1_DATABASE_ID, or unset them deliberately to "
+                    "run against local SQLite."
+                ) from exc
+            else:
+                delay = probe_base_delay * (2 ** attempt)
+                logger.warning(
+                    "D1 boot probe failed (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1, probe_retries, delay, exc
+                )
+                await asyncio.sleep(delay)
 
     return backend
 
@@ -1849,6 +1864,10 @@ async def init_persistence() -> None:
     problem the fix is to stop running DDL on every boot, not to skip the
     statements.
     """
+    # Restore from KV backup if available (ephemeral disk protection)
+    if _kv_configured():
+        await _kv_download(DB_PATH)
+
     db = await get_workspace_db()
     await db.executescript(CREATE_TABLES_SQL)
     await db.commit()
@@ -1874,8 +1893,88 @@ async def init_persistence() -> None:
         )
 
 
+# ── Cloudflare KV Backup/Restore ──────────────────────────────────────────────
+
+_KV_NAMESPACE_ID = "5b16c98175e44680be0cf35f1be65e8f"
+_KV_ACCOUNT_ID = "44f94d3a0d718f3192a26fe49401bdd9"
+_KV_API_BASE = "https://api.cloudflare.com/client/v4"
+
+_KV_KEY = "workspace_backup.db"  # single key storing the entire SQLite file
+
+
+def _kv_configured() -> bool:
+    """True when KV credentials are available via env."""
+    return bool(os.getenv("CF_KV_TOKEN"))
+
+
+def _kv_headers() -> dict[str, str]:
+    tok = os.getenv("CF_KV_TOKEN")
+    if not tok:
+        raise RuntimeError("CF_KV_TOKEN not set")
+    return {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+
+
+async def _kv_upload(local_path: str) -> None:
+    """Upload the local SQLite file to Cloudflare KV."""
+    if not _kv_configured():
+        return
+    # Force WAL checkpoint so the main .db file has all changes
+    try:
+        import aiosqlite
+        async with aiosqlite.connect(local_path) as conn:
+            await conn.execute("PRAGMA wal_checkpoint(FULL)")
+    except Exception:
+        pass  # best effort
+    data = open(local_path, "rb").read()
+    import base64
+    b64 = base64.b64encode(data).decode()
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/"
+        f"{_KV_ACCOUNT_ID}/storage/kv/namespaces/{_KV_NAMESPACE_ID}/values/{_KV_KEY}"
+    )
+    headers = _kv_headers()
+    body = json.dumps({"value": b64, "metadata": {"size": len(data)}}).encode()
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.put(url, headers=headers, content=body)
+        if r.status_code >= 300:
+            logger.warning("KV backup upload failed: %s %s", r.status_code, r.text[:200])
+
+
+async def _kv_download(local_path: str) -> bool:
+    """Download the SQLite file from Cloudflare KV to local_path.
+    Returns True if downloaded, False if not found or not configured.
+    """
+    if not _kv_configured():
+        return False
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/"
+        f"{_KV_ACCOUNT_ID}/storage/kv/namespaces/{_KV_NAMESPACE_ID}/values/{_KV_KEY}"
+    )
+    headers = _kv_headers()
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.get(url, headers=headers)
+        if r.status_code == 404:
+            return False
+        if r.status_code >= 300:
+            logger.warning("KV backup download failed: %s %s", r.status_code, r.text[:200])
+            return False
+        d = r.json()
+        # KV API returns value at top-level "value" key, not inside "result"
+        b64 = d.get("value") or d.get("result", {}).get("value")
+        if not b64:
+            return False
+        import base64
+        data = base64.b64decode(b64)
+        with open(local_path, "wb") as f:
+            f.write(data)
+        logger.info("Restored workspace DB from KV (%d bytes)", len(data))
+        return True
+
+
+# ── Close persistence with KV backup ──────────────────────────────────────────
+
 async def close_persistence() -> None:
-    """Close the shared database connection, if open."""
+    """Close the shared database connection, if open, and backup to KV."""
     global _db, _lock, _backend_kind
     async with _get_lock():
         if _db is not None:
@@ -1883,6 +1982,9 @@ async def close_persistence() -> None:
             _db = None
         _backend_kind = "uninitialised"
         _lock = None  # next asyncio.run() binds a fresh lock to its loop
+    # Backup to KV after closing (ephemeral disk protection)
+    if _kv_configured():
+        await _kv_upload(DB_PATH)
 
 
 # ── Sync escape hatch ───────────────────────────────────────────────────────
