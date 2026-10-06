@@ -1943,6 +1943,7 @@ async def _kv_upload(local_path: str) -> None:
 async def _kv_download(local_path: str) -> bool:
     """Download the SQLite file from Cloudflare KV to local_path.
     Returns True if downloaded, False if not found or not configured.
+    Short timeout (5s) to never block health checks.
     """
     if not _kv_configured():
         return False
@@ -1951,15 +1952,15 @@ async def _kv_download(local_path: str) -> bool:
         f"{_KV_ACCOUNT_ID}/storage/kv/namespaces/{_KV_NAMESPACE_ID}/values/{_KV_KEY}"
     )
     headers = _kv_headers()
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.get(url, headers=headers)
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(url, headers=headers)
         if r.status_code == 404:
             return False
         if r.status_code >= 300:
             logger.warning("KV backup download failed: %s %s", r.status_code, r.text[:200])
             return False
         d = r.json()
-        # KV API returns value at top-level "value" key, not inside "result"
         b64 = d.get("value") or d.get("result", {}).get("value")
         if not b64:
             return False
@@ -1969,6 +1970,9 @@ async def _kv_download(local_path: str) -> bool:
             f.write(data)
         logger.info("Restored workspace DB from KV (%d bytes)", len(data))
         return True
+    except Exception as exc:
+        logger.warning("KV download error (non-fatal): %s", exc)
+        return False
 
 
 # ── Close persistence with KV backup ──────────────────────────────────────────
