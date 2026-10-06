@@ -1865,8 +1865,10 @@ async def init_persistence() -> None:
     statements.
     """
     # Restore from KV backup if available (ephemeral disk protection)
+    # Run in background after app starts to never block boot/health checks
     if _kv_configured():
-        await _kv_download(DB_PATH)
+        import asyncio
+        asyncio.create_task(_kv_download_async(DB_PATH))
 
     db = await get_workspace_db()
     await db.executescript(CREATE_TABLES_SQL)
@@ -1903,8 +1905,8 @@ _KV_KEY = "workspace_backup.db"  # single key storing the entire SQLite file
 
 
 def _kv_configured() -> bool:
-    """True when KV credentials are available via env."""
-    return bool(os.getenv("CF_KV_TOKEN"))
+    """True when KV credentials are available AND explicitly enabled via env."""
+    return bool(os.getenv("CF_KV_TOKEN")) and os.getenv("ENABLE_KV_BACKUP") == "true"
 
 
 def _kv_headers() -> dict[str, str]:
@@ -1975,6 +1977,22 @@ async def _kv_download(local_path: str) -> bool:
         return False
 
 
+async def _kv_download_async(local_path: str) -> None:
+    """Fire-and-forget background KV download to never block boot."""
+    try:
+        await _kv_download(local_path)
+    except Exception as exc:
+        logger.warning("Background KV download failed: %s", exc)
+
+
+async def _kv_upload_async(local_path: str) -> None:
+    """Fire-and-forget background KV upload to never block shutdown."""
+    try:
+        await _kv_upload(local_path)
+    except Exception as exc:
+        logger.warning("Background KV upload failed: %s", exc)
+
+
 # ── Close persistence with KV backup ──────────────────────────────────────────
 
 async def close_persistence() -> None:
@@ -1988,7 +2006,8 @@ async def close_persistence() -> None:
         _lock = None  # next asyncio.run() binds a fresh lock to its loop
     # Backup to KV after closing (ephemeral disk protection)
     if _kv_configured():
-        await _kv_upload(DB_PATH)
+        import asyncio
+        asyncio.create_task(_kv_upload_async(DB_PATH))
 
 
 # ── Sync escape hatch ───────────────────────────────────────────────────────

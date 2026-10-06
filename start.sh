@@ -33,6 +33,17 @@ else
   echo "[start]       The gateway will start with an empty database."
 fi
 
+# ── KV restore: download workspace DB from Cloudflare KV if available ────────
+# Render FREE has an ephemeral disk — every deploy wipes the local SQLite file.
+# Cloudflare D1 is blocked from Render IPs (403 error 1010). KV has no IP blocks.
+# This restore runs BEFORE the app boots, so the CEO's memory survives deploys.
+if [ -n "${CF_KV_TOKEN:-}" ]; then
+  echo "[start] restoring workspace DB from Cloudflare KV"
+  python "$ROOT/kv_backup.py" restore || echo "[start] WARN: KV restore failed (boot continues)"
+else
+  echo "[start] WARN: CF_KV_TOKEN unset - workspace DB will be empty on each deploy"
+fi
+
 echo "[start] booting FreeLLMAPI on internal port $FREEAPI_PORT"
 
 # HOST=127.0.0.1 keeps the proxy loopback-only so Render detects only the
@@ -206,10 +217,27 @@ if [ -n "${GH_BACKUP_TOKEN:-}" ]; then
   echo "[start] db backup loop started (every 20 min, pid=$SYNC_PID)"
 fi
 
+# ── Periodic KV backup (every 5 min) ────────────────────────────────────────
+# The shutdown trap only fires on a graceful SIGTERM. Render's free tier can
+# also recycle a container without one, so a periodic snapshot means at most
+# 5 minutes of CEO memory is ever at risk, instead of everything since boot.
+if [ -n "${CF_KV_TOKEN:-}" ]; then
+  (
+    while true; do
+      sleep 300
+      python "$ROOT/kv_backup.py" backup || true
+    done
+  ) &
+  KV_SYNC_PID=$!
+  echo "[start] KV backup loop started (every 5 min, pid=$KV_SYNC_PID)"
+fi
+
 term() {
   # Final sync so the last window of changes survives the restart.
   [ -n "${GH_BACKUP_TOKEN:-}" ] && python -m admin.db_backup sync || true
-  kill "$FREEAPI_PID" "$BACKEND_PID" ${SYNC_PID:-} 2>/dev/null || true
+  # KV backup: upload current workspace DB to Cloudflare KV so next deploy restores it
+  [ -n "${CF_KV_TOKEN:-}" ] && python "$ROOT/kv_backup.py" backup || true
+  kill "$FREEAPI_PID" "$BACKEND_PID" ${SYNC_PID:-} ${KV_SYNC_PID:-} 2>/dev/null || true
   wait || true
   exit 0
 }
