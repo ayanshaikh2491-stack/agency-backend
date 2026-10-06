@@ -1943,7 +1943,7 @@ async def _kv_upload(local_path: str) -> None:
 async def _kv_download(local_path: str) -> bool:
     """Download the SQLite file from Cloudflare KV to local_path.
     Returns True if downloaded, False if not found or not configured.
-    Short timeout (5s) to never block health checks.
+    Short timeout (3s) to never block health checks.
     """
     if not _kv_configured():
         return False
@@ -1953,7 +1953,7 @@ async def _kv_download(local_path: str) -> bool:
     )
     headers = _kv_headers()
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             r = await client.get(url, headers=headers)
         if r.status_code == 404:
             return False
