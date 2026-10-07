@@ -33,6 +33,17 @@ else
   echo "[start]       The gateway will start with an empty database."
 fi
 
+# ── DB diagnostic ──────────────────────────────────────────────────────────
+# The branch snapshots decrypt cleanly but are not SQLite files, while the same
+# databases are valid locally. The difference is inside the container, and the
+# container is the only place that can see it: the Render REST API does not
+# return logs and nobody is watching the dashboard at boot. So the container
+# reports its own state to the data branch (db_diagnose.txt) and to stdout.
+#
+# Non-fatal by construction. This must never be a reason the service fails to
+# come up.
+python -m admin.db_diagnose || echo "[start] WARN: db_diagnose failed (boot continues)"
+
 # ── KV restore: download workspace DB from Cloudflare KV if available ────────
 # Render FREE has an ephemeral disk — every deploy wipes the local SQLite file.
 # Cloudflare D1 is blocked from Render IPs (403 error 1010). KV has no IP blocks.
