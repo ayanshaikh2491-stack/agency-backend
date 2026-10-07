@@ -32,12 +32,58 @@ def _head(path: str, n: int = 32) -> bytes:
         return f"<unreadable: {e}>".encode()[:n]
 
 
+def _key_fingerprint() -> None:
+    """Prove which key this process actually uses.
+
+    Every other part of the backup path has been verified identical: the deployed
+    db_backup.py matches the local file byte for byte, _keystream matches, and a
+    local encrypt/decrypt round-trip is exact. Yet a snapshot produced by this
+    container does not decrypt. The one input that has never been checked from
+    the inside is the key itself, because the MAC covers the ciphertext and
+    therefore cannot detect a wrong key.
+
+    This prints a test vector: a fixed plaintext encrypted with the key this
+    process resolves. Encrypt the same vector elsewhere with the same key and
+    compare. Identical means the key is the same and the fault is elsewhere;
+    different means the container is using a different key than expected.
+    """
+    from admin import db_backup
+
+    print("=" * 70)
+    print("key fingerprint")
+    print("=" * 70)
+    raw_key = os.getenv("ENCRYPTION_KEY", "")
+    print(f"  ENCRYPTION_KEY set   : {bool(raw_key)}")
+    print(f"  ENCRYPTION_KEY len   : {len(raw_key)}")
+    try:
+        import hashlib
+
+        print(f"  sha256(ENCRYPTION_KEY): {hashlib.sha256(raw_key.encode()).hexdigest()}")
+    except Exception as e:
+        print(f"  sha256 failed        : {e}")
+
+    print(f"  _backup_key() hex    : {db_backup._backup_key().hex()}")
+
+    # Test vector. Nonce is pinned so the result is reproducible.
+    vector = b"SQLite format 3\x00AGENCY-KEY-TEST-VECTOR"
+    pinned = bytes(range(16))
+    key = db_backup._backup_key()
+    ks = db_backup._keystream(key, pinned, len(vector))
+    ct = bytes(a ^ b for a, b in zip(vector, ks))
+    print(f"  vector plaintext     : {vector!r}")
+    print(f"  pinned nonce         : {pinned.hex()}")
+    print(f"  vector ciphertext    : {ct.hex()}")
+    print("  Recompute this locally with the same key. If it differs, the")
+    print("  container is using a different key than the one you expect.")
+
+
 def main() -> None:
     buf = io.StringIO()
     real = sys.stdout
     sys.stdout = buf
     try:
         _report()
+        _key_fingerprint()
     finally:
         sys.stdout = real
     text = buf.getvalue()
