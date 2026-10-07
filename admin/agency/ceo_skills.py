@@ -160,6 +160,68 @@ CEO_SKILL_REGISTRY: list[dict] = [
         ],
         "description": "AI product strategy — what to build, product direction",
     },
+    # ── Founder skills (github.com/ognjengt/founder-skills) ─────────────────
+    # Adapted for autonomous use by copy_founder_skills.py. These are the ones
+    # that move a lead to a booked appointment, which is the only thing TAGS
+    # Agency sells. The social-content skills upstream (linkedin-writer,
+    # x-writer, brand-copywriter) were deliberately left out: they produce
+    # reach, not revenue.
+    {
+        "name": "outreach-specialist",
+        "keywords": [
+            "outreach", "cold email", "follow up", "follow-up", "sequence",
+            "reach out", "prospect", "dm", "book a call", "reply",
+        ],
+        "description": "Outreach that books calls: personalised sequences, warm hooks, reply handling",
+    },
+    {
+        "name": "strategic-planning",
+        "keywords": [
+            "strategy", "next quarter", "what should we do", "prioritise",
+            "prioritize", "plan", "roadmap", "what next", "direction",
+        ],
+        "description": "Strategic planning — choose the next move instead of defaulting to prospecting",
+    },
+    {
+        "name": "pricing-strategist",
+        "keywords": [
+            "pricing", "price", "retainer", "how much", "charge", "rate",
+            "package", "quote",
+        ],
+        "description": "Pricing against appointments booked, not leads delivered",
+    },
+    {
+        "name": "go-to-market-plan",
+        "keywords": [
+            "go to market", "gtm", "launch", "first client", "entering a market",
+            "acquisition strategy", "channel",
+        ],
+        "description": "Go-to-market for a service business — how to actually enter the local market",
+    },
+    {
+        "name": "lead-magnet-generator",
+        "keywords": [
+            "lead magnet", "content asset", "ebook", "whitepaper", "checklist",
+            "free resource", "magnet",
+        ],
+        "description": "Lead magnets that let a clinic see value before paying a retainer",
+    },
+    {
+        "name": "competitor-intel",
+        "keywords": [
+            "competitor", "competition", "positioning", "upwork", "fiverr",
+            "freelancer", "why would they choose", "switch",
+        ],
+        "description": "Position against local agencies and Upwork-style freelancers",
+    },
+    {
+        "name": "viral-hook-creator",
+        "keywords": [
+            "hook", "first line", "subject line", "opening line", "grab attention",
+            "headline",
+        ],
+        "description": "The first line that makes a cold prospect reply instead of delete",
+    },
 ]
 
 MAX_SKILL_CONTENT_CHARS = 6000   # CEO model context is larger; keep generous

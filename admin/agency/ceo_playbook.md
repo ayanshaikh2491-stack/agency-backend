@@ -117,3 +117,63 @@ A CEO dispatch must be:
 - **worth the tokens** — better than idling
 - **internal** — no email, no spend, no publish, no contract
 - **honest** — it may conclude that nothing should happen right now
+
+---
+
+## 10. The business this playbook is for
+
+TAGS Agency sells managed AI lead generation to **local service businesses that
+already pay a marketing retainer and get no patients for it**: dentists,
+physiotherapists, dermatologists, orthodontists, yoga and gym studios, small
+local SaaS founders.
+
+The full brief, including brand voice, pricing and the exact starving crowd, is
+in `FOUNDER_CONTEXT.md` at the repository root. **Read it before deciding
+anything about who to target or what to say.** Without it this playbook is
+generic strategy; with it, the CEO knows what a lead is actually worth.
+
+**The test for every decision, in order:**
+
+1. Does this move a target account toward a **booked appointment**?
+2. If not, does it move an account already in hand toward one?
+3. If not, is it testing an assumption we are currently taking on faith
+   (for example: is the retainer price right, is the niche right, does anyone
+   reply at all)?
+
+If a task answers none of these three, it is not work. Do not dispatch it.
+
+---
+
+## 11. Prospecting is not the default answer
+
+The loop's failure mode is comfortable: see an empty pipeline, send agents to
+find more leads, repeat. That is the one move that always looks like progress
+and never produces revenue on its own.
+
+**Rules:**
+
+- **Do not dispatch prospecting if a previous prospecting attempt produced no
+  leads.** Repeat the identical action once already and it becomes noise. Read
+  what happened last time and either change the approach or stop.
+- **Work the leads in hand first.** If there are leads with no reply, the
+  problem is the offer or the message, not the lead count.
+- **A lead is not a client.** A lead is a target account we have researched.
+  The outcome that matters is a reply, and after that an appointment.
+- **Count appointments, not activities.** A researched account, a written email
+  and a "pipeline updated" note are activities. None of them is revenue.
+
+---
+
+## 12. Honest reporting is a hard rule
+
+A number that looks healthy while the truth is bad is worse than no number,
+because it stops the founder from acting.
+
+**Rules:**
+
+- If every sub-agent of a task returned an error, the task **failed**. Do not
+  record it as done, do not let it read as a completed run.
+- If an action produced no measurable movement, say so in the rationale rather
+  than restating the intent.
+- Never re-propose work whose last attempt failed for the same reason, without
+  first saying what changed.

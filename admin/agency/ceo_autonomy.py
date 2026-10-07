@@ -587,6 +587,46 @@ async def request_approval(
     return approval
 
 
+async def _recent_decision_summary(limit: int = 8) -> list[dict[str, Any]]:
+    """What the CEO already tried, so it can stop repeating a failed move.
+
+    An autonomous loop that cannot see its own history cannot learn. This is
+    deliberately cheap and deliberately lossy: only the action, the first part
+    of the rationale and the outcome shape, because the thinker prompt is
+    already long and a full history would crowd out the playbook.
+
+    Failures are listed first and marked, because the case that matters is the
+    one where the same action keeps being proposed after it kept failing.
+    """
+    try:
+        from admin.persistence import get_db
+
+        db = get_db()
+        rows = await db.fetchall(
+            "SELECT action, rationale, created_at FROM ceo_autonomy_decisions "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("CEO history unavailable: %s", _safe_error(exc))
+        return []
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        action = str(r.get("action") or "")
+        rationale = str(r.get("rationale") or "")
+        out.append({
+            "action": action,
+            "when": str(r.get("created_at") or "")[:16],
+            "what": rationale[:180],
+            # "review_required" and "observe" are bookkeeping, not attempts at
+            # real work. Marking them would fill the history with noise and hide
+            # the one repetition that actually matters.
+            "was_real_work": action in ("delegate", "bootstrap_prospecting"),
+        })
+    return out
+
+
 async def _record_decision(
     event_id: str,
     workspace_id: str,
@@ -931,6 +971,14 @@ class CEOAutonomy:
                 "result": {"overview": summary},
             }
 
+        # Recent history, so the CEO can stop repeating a move that already
+        # failed. Without this the loop has no memory of its own attempts: it
+        # saw an empty pipeline, dispatched prospecting, the sub-agents timed
+        # out, and on the next tick saw an empty pipeline again and dispatched
+        # prospecting again. Nineteen consecutive identical "successful" runs,
+        # zero leads.
+        recent = await _recent_decision_summary()
+
         prompt = (
             _load_ceo_playbook()
             + "\n\n---\n\n"
@@ -938,9 +986,16 @@ class CEOAutonomy:
             "to local service businesses. Render is the office you live in and "
             "your agents are your staff. Nobody will hand you work.\n\n"
             f"CURRENT STATE OF THE AGENCY:\n{_json_dumps(summary)}\n\n"
+            f"WHAT YOU ALREADY TRIED RECENTLY:\n{_json_dumps(recent)}\n\n"
             "Decide the single highest-value INTERNAL action to take right now, "
             "then dispatch it to exactly one agent.\n"
             "Choose an agent from: " + ", ".join(sorted(_THINK_AGENTS)) + "\n\n"
+            "Before you dispatch, check the history above. If you are about to "
+            "repeat an action that already failed, do NOT repeat it. Either "
+            "choose a genuinely different action, or return:\n"
+            '{"action":"observe","rationale":"<what already failed, and what '
+            'must change before it is worth retrying>","agent_type":"",'
+            '"task":""}\n\n'
             'Reply with JSON only, no prose:\n'
             '{"action":"delegate","rationale":"one sentence, in your own words",'
             '"agent_type":"<agent>","task":"<specific, checkable instruction>"}'
@@ -1333,7 +1388,34 @@ class CEOAutonomy:
                 if output.startswith("ERROR:"):
                     errors[agent_type] = output
                 results[agent_type] = output
-            status = "done"
+
+            # Status must reflect the sub-agents, not the gather() call. This
+            # used to be unconditionally "done", which is how a task whose every
+            # agent timed out got stored as a successful run. The CEO then read
+            # 19 consecutive "successful" prospecting decisions that had in fact
+            # produced nothing at all.
+            #
+            # All-failed is a failure. Partial success is still a partial success
+            # and is recorded as "degraded": the real work did happen, and
+            # flattening it to either done or error would both lose that.
+            if agents and len(errors) == len(agents):
+                status = "error"
+                errors["orchestration"] = (
+                    f"all {len(agents)} sub-agents failed: "
+                    + ", ".join(f"{k}: {v[:120]}" for k, v in errors.items())
+                )
+                logger.warning(
+                    "CEO orchestration %s marked error, not done: all %d "
+                    "sub-agents failed", orch_id, len(agents),
+                )
+            elif errors:
+                status = "degraded"
+                logger.warning(
+                    "CEO orchestration %s degraded: %d of %d sub-agents failed",
+                    orch_id, len(errors), len(agents),
+                )
+            else:
+                status = "done"
         except Exception as exc:
             status = "error"
             errors["orchestration"] = _safe_error(exc)
@@ -1457,7 +1539,11 @@ class CEOAutonomy:
                     get_bus().respond(
                         bus_id,
                         result=result[:4000],
-                        status="done" if status == "done" else "failed",
+                        # "degraded" is a partial success, not a failure. Mapping
+                        # it to "failed" would tell the bus the whole
+                        # orchestration produced nothing, which is what made the
+                        # real, salvageable output look worthless downstream.
+                        status=status if status in ("done", "degraded") else "failed",
                         errors=error[:500],
                     )
                 except Exception as exc:
