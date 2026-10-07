@@ -41,6 +41,15 @@ API = "https://api.github.com"
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+
+class LegacySnapshot(ValueError):
+    """A snapshot written by the retired ciphertext-tag format.
+
+    Subclasses ValueError so every existing `except ValueError` around
+    _decrypt() keeps working unchanged.
+    """
+
+
 # local path -> branch path
 # tags_agency_workspace.db is the CEO's actual memory: persistence.py points
 # DB_PATH at it, so it is the file whose loss on redeploy resets the CEO to
@@ -90,7 +99,12 @@ def _checkpoint(db_path: str) -> None:
 # It is a real construction, not XOR-with-a-repeated-key, but it is not a
 # vetted AEAD — if this ever holds data that matters, move to AES-GCM from the
 # `cryptography` package and keep the header below for format detection.
-_MAGIC = b"AGDB1"
+# Format marker. The trailing digit is the FORMAT VERSION, not decoration:
+# AGDB1 tagged sha256(ciphertext), AGDB2 tags HMAC(plaintext). Bump it whenever
+# the layout or the authentication changes, so a version skew is detectable
+# instead of showing up as an unexplained decrypt failure weeks later.
+_MAGIC_V1 = b"AGDB1"
+_MAGIC = b"AGDB2"
 
 
 def _backup_key() -> bytes:
@@ -118,23 +132,49 @@ def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
 
 
 def _encrypt(raw: bytes) -> bytes:
+    """Encrypt and authenticate.
+
+    The tag is HMAC over the PLAINTEXT, not over the ciphertext. This matters
+    more than it looks. A tag over the ciphertext can only prove the ciphertext
+    was not altered in transit; it cannot detect a wrong key, which is the most
+    likely failure by far. With a ciphertext tag, decrypting a snapshot under
+    the wrong key silently produces noise: correct magic header, plausible
+    length, random bytes. restore()'s sqlite check catches that, but only after
+    the snapshot has already been downloaded, decrypted and discarded.
+
+    MAC-then-encrypt over the plaintext means a wrong key raises immediately.
+    """
     nonce = os.urandom(16)
     key = _backup_key()
+    tag = hmac.new(key, raw, hashlib.sha256).digest()[:16]
     body = bytes(a ^ b for a, b in zip(raw, _keystream(key, nonce, len(raw))))
-    return _MAGIC + nonce + hashlib.sha256(body).digest()[:16] + body
+    return _MAGIC + nonce + tag + body
 
 
 def _decrypt(blob: bytes) -> bytes | None:
-    """Return plaintext, or None when the blob predates encryption."""
+    """Return plaintext, or None when the blob predates encryption.
+
+    Snapshots written by AGDB1 carry sha256(ciphertext) in the tag position.
+    They are rejected rather than guessed at: there is no way to tell a legacy
+    blob from a wrong-key failure on the wire alone, and silently accepting one
+    is how garbage gets written over a good database. sync() regenerates them
+    within one interval.
+    """
+    if blob.startswith(_MAGIC_V1):
+        raise LegacySnapshot(
+            "AGDB1 snapshot uses the retired ciphertext-tag format; it will be "
+            "replaced within one sync interval")
     if not blob.startswith(_MAGIC):
         return None
     key = _backup_key()
     nonce = blob[len(_MAGIC) : len(_MAGIC) + 16]
     tag = blob[len(_MAGIC) + 16 : len(_MAGIC) + 32]
     body = blob[len(_MAGIC) + 32 :]
-    if hashlib.sha256(body).digest()[:16] != tag:
-        raise ValueError("backup MAC mismatch - wrong key or corrupted payload")
-    return bytes(a ^ b for a, b in zip(body, _keystream(key, nonce, len(body))))
+    plain = bytes(a ^ b for a, b in zip(body, _keystream(key, nonce, len(body))))
+    if hmac.new(key, plain, hashlib.sha256).digest()[:16] != tag:
+        raise ValueError(
+            "backup MAC mismatch - wrong key, or the payload was corrupted")
+    return plain
 
 
 def _get_meta(branch_path: str) -> dict | None:
