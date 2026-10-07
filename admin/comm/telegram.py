@@ -1,4 +1,5 @@
 """Telegram Bot for CEO internal commands, alerts, and direct CEO chat."""
+import asyncio
 import os
 import httpx
 import json
@@ -16,6 +17,10 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGR
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 
 logger = logging.getLogger(__name__)
+
+# Strong references to in-flight webhook tasks, so they are never garbage
+# collected before they deliver their reply. See _dispatch_in_background().
+_PENDING: Set["asyncio.Task[Any]"] = set()
 
 
 # ── Chat authorization guard ──────────────────────────────────────────────────
@@ -438,6 +443,15 @@ async def process_telegram_update(body: Dict[str, Any]) -> Dict[str, Any]:
 async def telegram_webhook(request: Request):
     """Handle incoming Telegram messages - commands + CEO chat.
 
+    This route acknowledges Telegram IMMEDIATELY and does the real work in a
+    background task.
+
+    The ordering is the whole point. A CEO reply is a full LLM round trip, which
+    takes tens of seconds. Telegram only waits about 10 seconds for a webhook
+    response; anything slower is treated as a failure and the update is redelivered,
+    which is what made replies arrive late and sometimes twice. Ack first, think
+    after, and let `send_telegram_message` deliver the answer out of band.
+
     This route is a thin adapter only: it turns HTTP into an update dict and
     hands it to process_telegram_update(), which owns the authorization guard
     and is the sole dispatcher to handle_ceo_command()/handle_ceo_chat().
@@ -464,11 +478,66 @@ async def telegram_webhook(request: Request):
 
         # No message text is logged at INFO level; the guard logs chat and user
         # ids only.
-        return await process_telegram_update(body)
+        #
+        # Authorization runs here, synchronously, because it is pure id
+        # comparison with no I/O and it is the answer the caller (and the tests,
+        # and anyone auditing an incident) needs to see in the response. Only
+        # the slow part is detached.
+        message = body.get("message") or body.get("edited_message")
+        if not isinstance(message, dict) or not message:
+            return {"ok": True, "authorized": True, "handled": False}
+
+        decision = authorize_update(message)
+        if not decision.allowed:
+            logger.warning(
+                "Telegram update rejected from chat_id=%s user_id=%s (%s)",
+                decision.chat_id, decision.user_id, decision.reason,
+            )
+            return {"ok": True, "authorized": False, "handled": False}
+
+        # process_telegram_update re-runs the guard. That is deliberate: it stays
+        # the single funnel every update must pass through, and the check costs
+        # nothing next to the LLM call it is protecting.
+        _dispatch_in_background(body)
+        return {"ok": True, "authorized": True, "handled": False}
 
     except Exception as e:
         logger.error(f"Telegram webhook error: {e}", exc_info=True)
         return {"ok": True}
+
+
+def _dispatch_in_background(body: Dict[str, Any]) -> None:
+    """Run process_telegram_update() off the request path.
+
+    The task holds a strong reference for its whole life. asyncio only keeps
+    weak references to tasks, so a fire-and-forget task that nobody holds can be
+    garbage collected mid-flight. That would silently drop the reply rather than
+    make it late, which is the failure mode that is much harder to notice.
+    """
+    task = asyncio.create_task(_guarded_process(body))
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)
+
+
+async def _guarded_process(body: Dict[str, Any]) -> None:
+    """process_telegram_update() with the exception handling it now needs.
+
+    It used to run inside the request, where the route's try/except caught
+    everything. Detached, an unhandled exception would only reach the event loop
+    logger, so the guarantee is made explicit here instead.
+    """
+    try:
+        await process_telegram_update(body)
+    except Exception as e:
+        logger.error("Telegram background dispatch failed: %s", e, exc_info=True)
+        try:
+            chat_id = ((body.get("message") or body.get("edited_message") or {})
+                       .get("chat") or {}).get("id")
+            if chat_id:
+                await send_telegram_message(
+                    f"CEO error: {str(e)[:100]}", str(chat_id))
+        except Exception:
+            logger.error("Could not deliver the Telegram error notice", exc_info=True)
 
 
 async def set_webhook(url: str) -> dict:
