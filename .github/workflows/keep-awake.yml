@@ -1,0 +1,53 @@
+# Keep the Render free instance awake.
+#
+# Render spins a free web service down after 15 minutes without inbound
+# requests, and the spin-up then takes about a minute. That is fatal for the
+# CEO: the first request after a quiet night just hangs while a cold container
+# boots, and any scheduled run during that window fails. This workflow sends
+# one cheap GET so the instance never idles.
+#
+# It hits /api/health rather than a heavier endpoint on purpose: the health
+# handler is cheap and does not run agent work, so waking the container does
+# not also wake a CEO tick.
+
+name: keep-awake
+
+on:
+  schedule:
+    # GitHub Actions will not run a scheduled workflow more often than every
+    # 5 minutes, and even a 3-minute cron gets queued behind platform load, so
+    # the real interval is ~5 minutes rather than exactly 3. That is well
+    # inside Render's 15-minute idle window, which is the thing being avoided.
+    - cron: '*/3 * * * *'
+  workflow_dispatch: # let a human trigger a ping without editing anything
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keep-awake
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake the instance
+        run: |
+          url="https://agency-backend-v2.onrender.com/api/health"
+          # 90s covers a cold start; a shorter timeout would report a failure
+          # for a container that was merely waking up.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 "$url" || echo "000")
+          echo "GET $url -> $code"
+          if [ "$code" = "200" ]; then
+            echo "Instance is awake."
+          else
+            echo "::warning::instance did not answer 200 (got $code). It may be cold-starting; the next ping will tell."
+          fi
+      # Always succeed. A failed scheduled run here would email the account
+      # owner for every hiccup, which trains people to ignore the alerts that
+      # matter. The job's value is the request, not the exit code.
+      - name: Always green
+        if: always()
+        run: echo "done"
