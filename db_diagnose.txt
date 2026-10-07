@@ -8,9 +8,9 @@ key set     = True
 --- tags_agency_workspace.db
     expected path : /app/tags_agency_workspace.db
     exists        : True
-    size          : 430080
+    size          : 495616
     is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x07\x00\x00\x00i'
+    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x08\x00\x00\x00y'
     is sqlite     : True
     tables        : 17
     integrity     : ok
@@ -41,7 +41,7 @@ every .db file visible under the app root
      1044480  sqlite=True   /app/node_modules/@freellmapi/server/data/freeapi.db
      1044480  sqlite=True   /app/server/data/freeapi.db
        36864  sqlite=True   /app/tags_agency.db
-      430080  sqlite=True   /app/tags_agency_workspace.db
+      495616  sqlite=True   /app/tags_agency_workspace.db
 
 ======================================================================
 sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
@@ -52,3 +52,15 @@ sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
            0  /app/server/data/freeapi.db-wal
        32768  /app/tags_agency_workspace.db-shm
            0  /app/tags_agency_workspace.db-wal
+======================================================================
+key fingerprint
+======================================================================
+  ENCRYPTION_KEY set   : True
+  ENCRYPTION_KEY len   : 64
+  sha256(ENCRYPTION_KEY): 73f41222a4582b04786405622dcc25883e23a6bb5175be0eeb03fb18a1573e1c
+  _backup_key() hex    : 73f41222a4582b04786405622dcc25883e23a6bb5175be0eeb03fb18a1573e1c
+  vector plaintext     : b'SQLite format 3\x00AGENCY-KEY-TEST-VECTOR'
+  pinned nonce         : 000102030405060708090a0b0c0d0e0f
+  vector ciphertext    : f365176f5c870f0cb108be14f6ca1102640c3e866dc50b27d272a06c2ed5028ebf45b0025f4b
+  Recompute this locally with the same key. If it differs, the
+  container is using a different key than the one you expect.
