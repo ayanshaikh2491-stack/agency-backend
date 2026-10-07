@@ -74,6 +74,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY admin ./admin
 COPY app.py ./
 COPY start.sh ./
+# start.sh invokes this at boot and on SIGTERM. Without this COPY it is absent
+# from the image and boot logs "can't open file '/app/kv_backup.py'".
+COPY kv_backup.py ./
 RUN chmod +x start.sh
 
 # Fixed internal port for the proxy; the public port comes from Render's $PORT.

@@ -25,6 +25,8 @@ Env:
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -40,7 +42,12 @@ API = "https://api.github.com"
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # local path -> branch path
+# tags_agency_workspace.db is the CEO's actual memory: persistence.py points
+# DB_PATH at it, so it is the file whose loss on redeploy resets the CEO to
+# zero. It was missing from this list, which is why backups were "working" and
+# the agent still forgot everything on every deploy.
 DB_FILES = {
+    os.path.join(_ROOT, "tags_agency_workspace.db"): "tags_agency_workspace.db",
     os.path.join(_ROOT, "tags_agency.db"): "tags_agency.db",
     os.path.join(_ROOT, "server", "data", "freeapi.db"): "freeapi.db",
 }
@@ -72,6 +79,64 @@ def _checkpoint(db_path: str) -> None:
         pass
 
 
+# ── Envelope encryption for the branch payload ───────────────────────────────
+# The backup repo (agency-backend) is PUBLIC, and the `data` branch is readable
+# by anyone without auth. Uploading a bare SQLite file would publish every
+# workspace, client lead, agent output and queued email body to the internet.
+#
+# This is HMAC-SHA256 in counter mode used as a stream cipher (encrypt-then-
+# MAC over the whole blob). It is stdlib-only on purpose: adding a crypto
+# dependency means a slower, failure-prone Docker rebuild on the free tier.
+# It is a real construction, not XOR-with-a-repeated-key, but it is not a
+# vetted AEAD — if this ever holds data that matters, move to AES-GCM from the
+# `cryptography` package and keep the header below for format detection.
+_MAGIC = b"AGDB1"
+
+
+def _backup_key() -> bytes:
+    """Key material for the branch payload.
+
+    Prefers ENCRYPTION_KEY (already present on the service and already the
+    secret the rest of the system relies on). Falls back to the backup token so
+    a misconfigured deploy still encrypts rather than silently uploading
+    plaintext.
+    """
+    material = os.getenv("ENCRYPTION_KEY") or TOKEN
+    if not material:
+        raise RuntimeError("no key material for backup encryption")
+    return hashlib.sha256(material.encode()).digest()
+
+
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        block = hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        out.extend(block)
+        counter += 1
+    return bytes(out[:length])
+
+
+def _encrypt(raw: bytes) -> bytes:
+    nonce = os.urandom(16)
+    key = _backup_key()
+    body = bytes(a ^ b for a, b in zip(raw, _keystream(key, nonce, len(raw))))
+    return _MAGIC + nonce + hashlib.sha256(body).digest()[:16] + body
+
+
+def _decrypt(blob: bytes) -> bytes | None:
+    """Return plaintext, or None when the blob predates encryption."""
+    if not blob.startswith(_MAGIC):
+        return None
+    key = _backup_key()
+    nonce = blob[len(_MAGIC) : len(_MAGIC) + 16]
+    tag = blob[len(_MAGIC) + 16 : len(_MAGIC) + 32]
+    body = blob[len(_MAGIC) + 32 :]
+    if hashlib.sha256(body).digest()[:16] != tag:
+        raise ValueError("backup MAC mismatch - wrong key or corrupted payload")
+    return bytes(a ^ b for a, b in zip(body, _keystream(key, nonce, len(body))))
+
+
 def _get_meta(branch_path: str) -> dict | None:
     try:
         return _gh("GET", f"/repos/{REPO}/contents/{branch_path}?ref={BRANCH}")
@@ -96,6 +161,15 @@ def restore() -> int:
             if not raw:
                 print(f"[db_backup] {branch_path} empty content — skip")
                 continue
+            try:
+                plain = _decrypt(raw)
+            except ValueError as e:
+                print(f"[db_backup] {branch_path} DECRYPT FAILED, refusing to load: {e}")
+                continue
+            if plain is None:
+                print(f"[db_backup] {branch_path} is a legacy plaintext snapshot — loading it")
+            else:
+                raw = plain
             os.makedirs(os.path.dirname(local), exist_ok=True)
             with open(local, "wb") as f:
                 f.write(raw)
@@ -118,7 +192,7 @@ def sync() -> int:
             _checkpoint(local)
             with open(local, "rb") as f:
                 raw = f.read()
-            b64 = base64.b64encode(raw).decode()
+            b64 = base64.b64encode(_encrypt(raw)).decode()
             meta = _get_meta(branch_path)
             _gh(
                 "PUT",
