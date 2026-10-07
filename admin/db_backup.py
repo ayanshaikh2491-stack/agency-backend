@@ -146,11 +146,26 @@ def _get_meta(branch_path: str) -> dict | None:
         raise
 
 
+def _looks_like_sqlite(raw: bytes) -> bool:
+    """True when raw starts with the SQLite file magic.
+
+    Every file in DB_FILES is a SQLite database, and every one of them is
+    restored onto the container filesystem before the app boots. A snapshot
+    that is not a SQLite file therefore does not degrade the service, it kills
+    it: persistence init opens the path, sqlite rejects it, and the container
+    exits without ever binding a port. This check is the difference between a
+    bad backup costing you an old snapshot and a bad backup taking the whole
+    service down.
+    """
+    return raw[:15] == b"SQLite format 3"
+
+
 def restore() -> int:
     if not TOKEN:
         print("[db_backup] GH_BACKUP_TOKEN unset, skipping restore")
         return 0
     total = 0
+    skipped = 0
     for local, branch_path in DB_FILES.items():
         meta = _get_meta(branch_path)
         if meta is None:
@@ -165,18 +180,40 @@ def restore() -> int:
                 plain = _decrypt(raw)
             except ValueError as e:
                 print(f"[db_backup] {branch_path} DECRYPT FAILED, refusing to load: {e}")
+                skipped += 1
                 continue
             if plain is None:
                 print(f"[db_backup] {branch_path} is a legacy plaintext snapshot — loading it")
             else:
                 raw = plain
-            os.makedirs(os.path.dirname(local), exist_ok=True)
-            with open(local, "wb") as f:
+            # Never install a snapshot that is not a database, and never
+            # install one that sqlite cannot actually open.
+            if not _looks_like_sqlite(raw):
+                print(f"[db_backup] {branch_path} is NOT a SQLite file ({len(raw)} bytes) — "
+                      "refusing to overwrite the local database")
+                skipped += 1
+                continue
+            tmp = local + ".restore-tmp"
+            os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
+            with open(tmp, "wb") as f:
                 f.write(raw)
+            try:
+                conn = sqlite3.connect(tmp)
+                conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                conn.close()
+            except sqlite3.Error as e:
+                os.remove(tmp)
+                print(f"[db_backup] {branch_path} failed to open as SQLite ({e}) — refusing to load")
+                skipped += 1
+                continue
+            os.replace(tmp, local)
             total += 1
             print(f"[db_backup] restored {branch_path} -> {local} ({len(raw)} bytes)")
         except Exception as e:
             print(f"[db_backup] restore {branch_path} failed: {e}")
+    if skipped:
+        print(f"[db_backup] {skipped} snapshot(s) rejected; the service will start on whatever "
+              "is already on disk rather than dying")
     return total
 
 
@@ -192,6 +229,13 @@ def sync() -> int:
             _checkpoint(local)
             with open(local, "rb") as f:
                 raw = f.read()
+            # Never publish a file that is not a database. A snapshot pushed
+            # from a half-written or clobbered file poisons the branch, and the
+            # next boot would restore it. Skipping here keeps the previous
+            # good snapshot on the branch instead.
+            if not _looks_like_sqlite(raw):
+                print(f"[db_backup] {branch_path} is not a SQLite file ({len(raw)} bytes) — not pushing")
+                continue
             b64 = base64.b64encode(_encrypt(raw)).decode()
             meta = _get_meta(branch_path)
             _gh(
