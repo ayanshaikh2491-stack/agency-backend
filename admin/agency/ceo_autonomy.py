@@ -642,6 +642,62 @@ async def _recent_decision_summary(limit: int = 8) -> list[dict[str, Any]]:
     return out
 
 
+# How many leads the thinker is shown, and how much of each field. The thinker
+# prompt is sent to a small free model on every tick, so this is bounded rather
+# than exhaustive; the point is that the CEO knows the names, not that it has
+# the whole CRM.
+_LEAD_BRIEF_MAX = 8
+_LEAD_FIELD_CHARS = 260
+
+
+async def _lead_brief(limit: int = _LEAD_BRIEF_MAX) -> str:
+    """The actual leads, rendered for the thinker prompt.
+
+    Counts are not enough. The CEO saw "total_leads: 5", concluded the next move
+    was to score them, and dispatched that sentence to an agent which has no
+    access to anything and replied that it would not invent lead data. Naming
+    the leads in the prompt is what lets the CEO write a task an agent can
+    actually execute.
+    """
+    try:
+        from admin.agency.sba_store import list_leads
+
+        leads = list_leads()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("CEO lead brief unavailable: %s", _safe_error(exc))
+        return "(lead list unavailable)"
+
+    leads = [l for l in leads if str(l.get("status") or "") not in ("closed", "lost")]
+    if not leads:
+        return "(no open leads)"
+
+    lines = []
+    for lead in leads[:limit]:
+        ctx = lead.get("context") or {}
+        name = str(lead.get("business_name") or lead.get("name") or "(unnamed)")
+        city = str(lead.get("city") or ctx.get("city") or "")
+        where = f" ({city})" if city else ""
+        pain = str(ctx.get("pain_point") or "")[:_LEAD_FIELD_CHARS]
+        hook = str(ctx.get("outreach_hook") or "")[:_LEAD_FIELD_CHARS]
+        parts = [f"- {name}{where} [status={lead.get('status')}, score={lead.get('score')}]"]
+        if pain:
+            parts.append(f"  pain: {pain}")
+        if hook:
+            parts.append(f"  outreach hook: {hook}")
+        contact = str(lead.get("email") or lead.get("phone") or "")
+        if contact:
+            parts.append(f"  contact: {contact}")
+        else:
+            # Said explicitly so the CEO does not plan outreach it cannot do.
+            parts.append("  contact: NONE ON FILE")
+        lines.append("\n".join(parts))
+
+    more = len(leads) - limit
+    if more > 0:
+        lines.append(f"- ...and {more} more open lead(s)")
+    return "\n".join(lines)
+
+
 async def _record_decision(
     event_id: str,
     workspace_id: str,
@@ -994,6 +1050,17 @@ class CEOAutonomy:
         # zero leads.
         recent = await _recent_decision_summary()
 
+        # The thinker was shown counts only. It would read "total_leads: 5",
+        # decide "score the five leads", and dispatch that sentence to an agent
+        # with no indication of which five. The agent then replied, correctly,
+        # that it had no lead data and would not invent any. Twelve consecutive
+        # delegations in that shape on 2026-10-08, all reported done.
+        #
+        # The CEO can only delegate useful work if it knows what the work is
+        # about, so the actual leads go into the prompt. Bounded, because this
+        # text is sent to a small free model on every think tick.
+        lead_brief = await _lead_brief()
+
         prompt = (
             _load_ceo_playbook()
             + "\n\n---\n\n"
@@ -1001,10 +1068,18 @@ class CEOAutonomy:
             "to local service businesses. Render is the office you live in and "
             "your agents are your staff. Nobody will hand you work.\n\n"
             f"CURRENT STATE OF THE AGENCY:\n{_json_dumps(summary)}\n\n"
+            f"THE LEADS YOU ACTUALLY HAVE:\n{lead_brief}\n\n"
             f"WHAT YOU ALREADY TRIED RECENTLY:\n{_json_dumps(recent)}\n\n"
             "Decide the single highest-value INTERNAL action to take right now, "
             "then dispatch it to exactly one agent.\n"
             "Choose an agent from: " + ", ".join(sorted(_THINK_AGENTS)) + "\n\n"
+            "The task you write is passed to the agent verbatim as the ONLY "
+            "context it gets. The agent cannot see the agency, the database, or "
+            "this conversation. So the task must restate the concrete facts it "
+            "needs: name the leads, quote their pain points, include their "
+            "cities. 'Analyse the leads' is unusable. 'Rank SmileCraft Dental "
+            "(Pune) and PhysioCare (Indore) by how easily an AI receptionist "
+            "converts their booked calls' is a task.\n\n"
             "Before you dispatch, check the history above. If you are about to "
             "repeat an action that already failed, do NOT repeat it. Either "
             "choose a genuinely different action, or return:\n"
@@ -1013,7 +1088,8 @@ class CEOAutonomy:
             '"task":""}\n\n'
             'Reply with JSON only, no prose:\n'
             '{"action":"delegate","rationale":"one sentence, in your own words",'
-            '"agent_type":"<agent>","task":"<specific, checkable instruction>"}'
+            '"agent_type":"<agent>","task":"<specific, checkable instruction '
+            'that names the leads and quotes their pain points>"}'
         )
 
         try:
