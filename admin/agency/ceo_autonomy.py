@@ -162,12 +162,27 @@ def _json_dumps(value: Any) -> str:
 
 
 def _json_loads(value: str | None, default: Any = None) -> Any:
+    """Parse a stored column that may hold either JSON or plain text.
+
+    The `result` column is written by two different code paths with two
+    different shapes: _run_orchestration stores json.dumps(merged), while
+    _run_task stores str(agent_output). Calling json.loads on the plain-text
+    case raises and the old code silently returned the default, so every
+    single-agent result came back from the API as an empty string.
+
+    That was not merely a display bug. The CEO reads its own task history back
+    through this helper to decide what it has already tried, so it saw "nothing
+    happened" after work that had in fact succeeded, and re-issued the same
+    decision every tick. Returning the original text on a parse failure is what
+    the column always meant.
+    """
     if not value:
         return {} if default is None else default
     try:
         parsed = json.loads(value)
     except (TypeError, ValueError):
-        return {} if default is None else default
+        # Plain text, not JSON. The value is the data; return it as-is.
+        return value
     return _safe_value(parsed)
 
 
