@@ -26,7 +26,15 @@ CUSTOM_ENDPOINTS_JSON="${CUSTOM_ENDPOINTS_JSON:-}"  # custom OpenAI-compatible p
 # must degrade to "no backups", never to "no service".
 if [ -n "${GH_BACKUP_TOKEN:-}" ]; then
   echo "[start] restoring DBs from backup branch"
-  python -m admin.db_backup restore || echo "[start] WARN: db restore failed (boot continues)"
+  # Hard wall-clock bound. Each GitHub call inside restore has its own 120s
+  # timeout and restore makes several in sequence, so an API that is slow or
+  # rate-limiting this IP can spend many minutes in here. Every deploy then
+  # failed with update_failed: the image built, then the container sat in this
+  # step until the health check on /api/health gave up, so it never bound its
+  # port. An empty database is recoverable; a container that never starts is
+  # not. Boot continues either way.
+  timeout "${DB_RESTORE_TIMEOUT:-120}" python -m admin.db_backup restore \
+    || echo "[start] WARN: db restore did not finish in ${DB_RESTORE_TIMEOUT:-120}s (boot continues)"
 else
   echo "[start] WARN: GH_BACKUP_TOKEN unset - DB backups off, and any previously"
   echo "[start]       backed-up data (LLM provider keys, unified key) is NOT restored."
@@ -42,7 +50,8 @@ fi
 #
 # Non-fatal by construction. This must never be a reason the service fails to
 # come up.
-python -m admin.db_diagnose || echo "[start] WARN: db_diagnose failed (boot continues)"
+timeout "${DB_DIAGNOSE_TIMEOUT:-60}" python -m admin.db_diagnose \
+  || echo "[start] WARN: db_diagnose did not finish (boot continues)"
 
 # ── KV restore: download workspace DB from Cloudflare KV if available ────────
 # Render FREE has an ephemeral disk — every deploy wipes the local SQLite file.
@@ -50,7 +59,8 @@ python -m admin.db_diagnose || echo "[start] WARN: db_diagnose failed (boot cont
 # This restore runs BEFORE the app boots, so the CEO's memory survives deploys.
 if [ -n "${CF_KV_TOKEN:-}" ]; then
   echo "[start] restoring workspace DB from Cloudflare KV"
-  python "$ROOT/kv_backup.py" restore || echo "[start] WARN: KV restore failed (boot continues)"
+  timeout "${KV_RESTORE_TIMEOUT:-60}" python "$ROOT/kv_backup.py" restore \
+    || echo "[start] WARN: KV restore did not finish (boot continues)"
 else
   echo "[start] WARN: CF_KV_TOKEN unset - workspace DB will be empty on each deploy"
 fi
