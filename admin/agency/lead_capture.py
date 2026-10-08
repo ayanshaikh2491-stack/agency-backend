@@ -39,6 +39,9 @@ _FALLBACK_DASH_RE = re.compile(r"\s-\s")
 
 _LIST_ITEM_RE = re.compile(r"^\s{0,4}(\d{1,2})[.)]\s+(.*\S)\s*$")
 _CITY_RE = re.compile(r"^[A-Z][A-Za-z .'-]{1,28}(?:\s*,\s*[A-Z]{2})?$")
+# "<business> <City> (qualifier)" as the models actually write it.
+_EMBEDDED_CITY_RE = re.compile(
+    r"^(?P<name>.+?)\s+(?P<city>[A-Z][a-z]{2,15})\s*\([^)]*\)\s*$")
 _STAR = re.compile(r"\*\*")
 _QUOTES = "\"'“”‘’"
 _LEAD_NOISE = re.compile(
@@ -79,8 +82,19 @@ def _parse_list_line(line: str) -> dict[str, Any] | None:
 
     name = _clean(parts[0])
     city = ""
+
+    # The model sometimes glues the city onto the business name, e.g.
+    # "BrightSmile Dental Nagpur (multi-location)". Pull it back out so the
+    # lead is searchable by city and the name is not polluted.
+    name, embedded_city = _split_embedded_city(name)
+
     if len(parts) >= 2 and _CITY_RE.match(_clean(parts[1])):
         city = _clean(parts[1])
+        # Consume both the name and the city. Advancing by one instead of two
+        # left the city in the tail, which then became the pain point.
+        parts = parts[2:]
+    elif embedded_city:
+        city = embedded_city
         parts = parts[1:]
 
     tail = " ".join(parts)
@@ -88,6 +102,19 @@ def _parse_list_line(line: str) -> dict[str, Any] | None:
     if not name:
         return None
     return {"business_name": name, "city": city, "pain_point": pain, "hook": hook}
+
+
+def _split_embedded_city(name: str) -> tuple[str, str]:
+    """Separate a trailing city from a business name, when present.
+
+    Only fires on a name shaped "<something> <City> (qualifier)", because that
+    is the pattern actually observed. Splitting a bare name on its last word
+    would turn "Peak Physio Clinic" into business="Peak Physio", city="Clinic".
+    """
+    m = _EMBEDDED_CITY_RE.match(name)
+    if not m:
+        return name, ""
+    return m.group(1).strip(), m.group(2).strip()
 
 
 def _parse_table_row(line: str) -> dict[str, Any] | None:

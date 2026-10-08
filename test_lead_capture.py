@@ -90,6 +90,43 @@ def test_header_and_divider_rows_are_not_leads():
     assert leads[0]["business_name"] == "Real Clinic"
 
 
+def test_city_is_not_repeated_into_the_pain_point():
+    """Observed live 2026-10-08: the first ten captured leads stored the city as
+    their pain point, e.g. `pain: Jaipur` for a Jaipur clinic. The city was
+    consumed into `city` and then joined into the tail anyway."""
+    text = "\n".join([
+        "1. Sunrise Yoga Studio – Jaipur – Pain: slow replies on Instagram DMs.",
+        "2. CityCare Dental – Nagpur – Pain: no-shows at 18 % each week.",
+    ])
+    leads = parse_sba_targets(text)
+    assert len(leads) == 2
+    assert leads[0]["city"] == "Jaipur"
+    assert leads[0]["pain_point"].rstrip(".") == "slow replies on Instagram DMs"
+    assert leads[1]["city"] == "Nagpur"
+    assert "Jaipur" not in leads[0]["pain_point"]
+
+
+def test_city_glued_onto_the_business_name_is_recovered():
+    """Observed live: `BrightSmile Dental Nagpur (multi-location) - ...`."""
+    text = ("1. BrightSmile Dental Nagpur (multi-location) – Pain: 3 branches, "
+            "reception overwhelmed. Hook: \"Let AI answer every branch at once.\"")
+    leads = parse_sba_targets(text)
+    assert len(leads) == 1
+    lead = leads[0]
+    assert lead["business_name"] == "BrightSmile Dental"
+    assert lead["city"] == "Nagpur"
+    assert lead["pain_point"].startswith("3 branches")
+    assert lead["hook"].startswith("Let AI answer")
+
+
+def test_business_name_ending_in_a_qualifier_word_is_not_split():
+    """The embedded-city rule must not eat the last word of a plain name."""
+    text = "1. Peak Physio Clinic – Denver, CO – Pain: no-shows."
+    leads = parse_sba_targets(text)
+    assert leads[0]["business_name"] == "Peak Physio Clinic"
+    assert leads[0]["city"] == "Denver, CO"
+
+
 def test_capture_persists_and_dedupes(monkeypatch):
     created = []
 
