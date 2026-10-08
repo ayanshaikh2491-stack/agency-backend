@@ -7,11 +7,23 @@ key set     = True
 
 --- tags_agency_workspace.db
     expected path : /app/tags_agency_workspace.db
-    exists        : False
+    exists        : True
+    size          : 217088
+    is file       : True
+    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x02\x00\x00\x005'
+    is sqlite     : True
+    tables        : 17
+    integrity     : ok
 
 --- tags_agency.db
     expected path : /app/tags_agency.db
-    exists        : False
+    exists        : True
+    size          : 36864
+    is file       : True
+    head          : b'SQLite format 3\x00\x10\x00\x01\x01\x00@  \x00\x00\x00\x05\x00\x00\x00\t'
+    is sqlite     : True
+    tables        : 3
+    integrity     : ok
 
 --- freeapi.db
     expected path : /app/server/data/freeapi.db
@@ -20,12 +32,14 @@ key set     = True
 ======================================================================
 every .db file visible under the app root
 ======================================================================
-  (none)
+       36864  sqlite=True   /app/tags_agency.db
+      217088  sqlite=True   /app/tags_agency_workspace.db
 
 ======================================================================
 sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
 ======================================================================
-  (none)
+       32768  /app/tags_agency_workspace.db-shm
+           0  /app/tags_agency_workspace.db-wal
 ======================================================================
 key fingerprint
 ======================================================================
