@@ -1356,18 +1356,19 @@ class CEOAutonomy:
                                 "action_type": "internal_analysis",
                                 "task": (
                                     "You are THREE agents working in parallel for the same goal: "
-                                    "identify a 'starving crowd' niche for TAGS Agency (local "
-                                    "B2B service businesses: dentists, physiotherapists, yoga coaches, "
-                                    "local SaaS founders). Each agent contributes ONE piece, then the "
-                                    "CEO merges: "
-                                    "[SBA] -> research 5 high-fit target accounts. TARGET "
-                                    "CITIES MUST BE IN INDIA - tier 1 or tier 2 only (Pune, "
-                                    "Indore, Jaipur, Lucknow, Nagpur, Surat, Coimbatore, "
-                                    "Bhopal, Patna). Do NOT invent US or European businesses. "
-                                    "For each: business name, city, pain-point our AI agents "
-                                    "solve, warm-outreach hook. "
-                                    "[CONTENT] -> write a 150-word hook blog/intro paragraph for the "
-                                    "chosen niche. "
+                                    "build a real prospect list for TAGS Agency (local B2B "
+                                    "service businesses in Indian tier-1/2 cities: dentists, "
+                                    "physiotherapists, skin clinics, orthopaedic centres). Each "
+                                    "agent contributes ONE piece, then the CEO merges. "
+                                    "[SBA] -> call the find_leads_http tool for category "
+                                    "'dentist' in city 'Pune', then category "
+                                    "'physiotherapist' in city 'Pune'. Do NOT invent, recall "
+                                    "or guess business names: those businesses do not exist and "
+                                    "cannot be contacted. Report ONLY what the tool returned. "
+                                    "For each one give: business name, city, phone, website, "
+                                    "and one sentence on the pain point an AI agent solves. "
+                                    "[CONTENT] -> write a 150-word hook paragraph for the "
+                                    "dental niche based on the businesses found. "
                                     "[WEBSITE] -> draft a 3-section landing page outline (hero, "
                                     "pain-points, cta). "
                                     "NO email, NO spend, NO publish, NO contract. Return only plain text."
@@ -1553,6 +1554,28 @@ class CEOAutonomy:
                         orch_id, report["error"])
             except Exception as exc:
                 merged["lead_capture"] = {"error": _safe_error(exc)}
+
+        # Prefer structured OSM results over anything the model wrote out.
+        # The model's line list is only as good as its transcription; the tool
+        # result carries the phone number and website exactly as OpenStreetMap
+        # has them, which is the difference between a contactable lead and an
+        # uncontactable one. Any OSM lead missing from the store is added here,
+        # so a run that only got as far as calling the tool still populates the
+        # pipeline.
+        try:
+            from admin.agency.lead_capture import capture_osm_leads
+
+            osm_report = await capture_osm_leads(
+                (results or {}).get("sba_tool_results") or (results or {}).get("osm") or [],
+                workspace_id=workspace_id,
+            )
+            if osm_report.get("created"):
+                logger.info(
+                    "CEO orchestration %s imported %d verified lead(s) from OSM",
+                    orch_id, osm_report["created"])
+                merged["osm_capture"] = osm_report
+        except Exception as exc:
+            merged["osm_capture"] = {"error": _safe_error(exc)}
 
         await emit_event(
             "agent.output",

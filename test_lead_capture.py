@@ -221,6 +221,66 @@ def test_create_lead_persists_city_instead_of_dropping_it():
     assert lead["website"] == "https://example.test"
 
 
+def test_osm_leads_import_with_real_contact_details(monkeypatch):
+    """The path that produces contactable leads. The agent's prose is a
+    transcription and can drop a phone number; the OSM row is the source."""
+    from admin.agency.lead_capture import capture_osm_leads
+
+    created = []
+
+    async def fake_create_lead(data):
+        created.append(data)
+
+    import admin.agency.sba_store as store
+    monkeypatch.setattr(store, "create_lead", fake_create_lead)
+    monkeypatch.setattr(store, "list_leads", lambda: [])
+
+    rows = [
+        {"name": "Advanced Dental Care Center", "city": "Pune",
+         "phone": "+919373965004", "website": "https://www.apneareamein.com/x",
+         "category": "dentist", "state": "Maharashtra"},
+        {"name": "Dr. Dixit's Dental Speciality", "city": "Pune",
+         "phone": "+91 20 3240 012", "website": "https://www.dixitdentalcare.com/",
+         "category": "dentist"},
+        {"name": "No Contact Clinic", "city": "Pune", "category": "dentist"},
+    ]
+    rep = asyncio.run(capture_osm_leads(rows, workspace_id="ws1"))
+    assert rep["created"] == 3
+    assert created[0]["phone"] == "+919373965004"
+    assert created[0]["website"].startswith("https://")
+    assert created[0]["city"] == "Pune"
+    # Contactable leads are scored higher than ones we cannot reach.
+    assert created[0]["score"] > created[2]["score"]
+    assert created[2]["score"] == 55
+
+
+def test_osm_import_dedupes_and_never_raises(monkeypatch):
+    from admin.agency.lead_capture import capture_osm_leads
+
+    created = []
+
+    async def fake_create_lead(data):
+        created.append(data)
+
+    import admin.agency.sba_store as store
+    monkeypatch.setattr(store, "create_lead", fake_create_lead)
+    monkeypatch.setattr(store, "list_leads",
+                        lambda: [{"business_name": "Advanced Dental Care Center"}])
+
+    rows = [{"name": "Advanced Dental Care Center", "phone": "+91"},
+            {"name": "New Clinic", "phone": "+92"}]
+    rep = asyncio.run(capture_osm_leads(rows))
+    assert rep["skipped_duplicate"] == 1
+    assert rep["created"] == 1
+
+    async def boom(_d):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(store, "create_lead", boom)
+    rep2 = asyncio.run(capture_osm_leads([{"name": "Another Clinic"}]))
+    assert rep2["error"] is not None
+
+
 def test_capture_persists_and_dedupes(monkeypatch):
     created = []
 

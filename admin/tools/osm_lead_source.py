@@ -15,10 +15,17 @@ import urllib.parse
 
 logger = logging.getLogger(__name__)
 
-# Free public Overpass endpoints (failover on 429/503)
+# Free public Overpass endpoints, tried in order (failover on 429/503/504).
+# Two was not enough: during live testing Jaipur returned 429 from both and
+# Lucknow returned 504 from both, while the first endpoint served Pune seconds
+# earlier. Public mirrors rate-limit independently, so more endpoints means
+# more chances that at least one is healthy.
+# overpass.osm.jp was tried here and removed: its certificate does not match
+# the hostname, so it can only ever fail the whole lookup on a TLS error.
 _OVERPASS_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
 )
 
 # category -> OSM tag filters tried in order (first with results wins)
@@ -65,6 +72,56 @@ _CATEGORY_TAGS: dict[str, list[str]] = {
     "furniture": ['["shop"="furniture"]'],
     "clothing": ['["shop"="clothes"]'],
     "pet store": ['["shop"="pet"]'],
+    # ── TAGS Agency's actual ICP, Indian market ─────────────────────────────
+    # The list above is US-centric and covers trades that barely exist in the
+    # tier-1/2 Indian cities this agency sells into. These are the categories
+    # from FOUNDER_CONTEXT.md, and each was returning zero leads until the tag
+    # was spelled the way OpenStreetMap actually spells it. Note the two
+    # different conventions: healthcare uses `healthcare:speciality=`,
+    # physios are tagged as a healthcare kind rather than an amenity.
+    "physiotherapist": [
+        '["healthcare"="physiotherapist"]',
+        '["amenity"="physiotherapist"]',
+        '["healthcare:speciality"="physiotherapy"]',
+        '["leisure"="sports_centre"]["healthcare"]',
+    ],
+    "physio": [
+        '["healthcare"="physiotherapist"]',
+        '["healthcare:speciality"="physiotherapy"]',
+    ],
+    "dermatologist": [
+        '["healthcare:speciality"="dermatology"]',
+        '["amenity"="dermatologist"]',
+    ],
+    "skin clinic": [
+        '["healthcare:speciality"="dermatology"]',
+        '["amenity"="dermatologist"]',
+    ],
+    "derm": ['["healthcare:speciality"="dermatology"]'],
+    "orthopaedic": [
+        '["healthcare:speciality"="orthopaedics"]',
+        '["amenity"="orthopaedic"]',
+    ],
+    "ortho": ['["healthcare:speciality"="orthopaedics"]'],
+    "orthopedic": ['["healthcare:speciality"="orthopaedics"]'],
+    "yoga": [
+        '["leisure"="sports_centre"]["name"~"[Yy]oga",i]',
+        '["leisure"="sports_centre"]["sport"~"[Yy]oga",i]',
+    ],
+    "yoga studio": [
+        '["leisure"="sports_centre"]["name"~"[Yy]oga",i]',
+        '["leisure"="sports_centre"]["sport"~"[Yy]oga",i]',
+    ],
+    "ayurveda": ['["healthcare"="ayurveda"]', '["amenity"="ayurveda"]'],
+    "homeopathy": ['["healthcare"="homeopathy"]'],
+    "optician": ['["healthcare"="optician"]', '["shop"="optician"]'],
+    "hospital": ['["amenity"="hospital"]', '["healthcare"="hospital"]'],
+    "diagnostic centre": [
+        '["amenity"="doctors"]["healthcare:speciality"="diagnostic"]',
+        '["healthcare"="diagnostic"]',
+    ],
+    "diagnostic center": ['["healthcare"="diagnostic"]'],
+    "cafe": ['["amenity"="cafe"]'],
 }
 
 # Generic fallback: try amenity=, shop=, craft=, office= with the category word
@@ -74,14 +131,28 @@ _PHONE_RE = re.compile(r"\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}")
 
 
 def _geo_area_filter(city: str, state: str) -> str:
-    """Overpass area selector for a named city (admin_level 8 = US city).
+    """Overpass area selector for a named city.
 
-    Kept deliberately light: name + level + boundary matches fast; heavier
-    state disambiguation regex made Overpass time out. State is carried in
-    the lead metadata instead of the query.
+    admin_level is deliberately NOT constrained. It was pinned to "8" on the
+    assumption that cities are admin_level 8, which is true in the US and false
+    almost everywhere else. In OpenStreetMap's own data:
+
+        Pune     admin_level=5     (5 elements at level 8, 0 at 5 or 6 or 7)
+        Indore   admin_level=5
+        Nagpur   admin_level=5
+        Surat    admin_level=8     (the exception that hid the bug)
+
+    So pinning to 8 returned zero areas for every Indian city except the rare
+    one that happened to match, and the lead finder reported an empty pipeline
+    rather than an error. Matching on name + boundary works in both countries
+    and does not need a country-specific table.
+
+    Kept deliberately light: name + boundary matches fast; a state
+    disambiguation regex made Overpass time out. State is carried in the lead
+    metadata instead of the query.
     """
     city_esc = city.replace('"', "")
-    return f'area["name"="{city_esc}"]["admin_level"="8"]["boundary"="administrative"]->.a;'
+    return f'area["name"="{city_esc}"]["boundary"="administrative"]->.a;'
 
 
 def _overpass_query(category: str, city: str, state: str, limit: int) -> str:
@@ -90,8 +161,14 @@ def _overpass_query(category: str, city: str, state: str, limit: int) -> str:
         word = category.strip().lower().replace('"', "")
         tagsets = [f'["{k}"="{word}"]' for k in _GENERIC_TAG_KEYS]
     body = _geo_area_filter(city, state)
-    unions = "".join(f"(nwr{ts}(area.a););" for ts in tagsets)
-    return f"[out:json][timeout:25];{body}{unions}out center tags {int(limit)};"
+    # One union block, newlines, no trailing semicolon on the closing paren.
+    # This is the only shape Overpass QL accepts for OR: emitting each tagset as
+    # its own standalone "(nwr[..](area.a););" statement silently discarded them
+    # all, so every category with more than one tagset returned zero leads.
+    # Dentist worked purely because it happened to have exactly one.
+    union = "\n  ".join(f"nwr{ts}(area.a);" for ts in tagsets)
+    return (f"[out:json][timeout:25];\n{body}\n(\n  {union}\n);\n"
+            f"out center tags {int(limit)};")
 
 
 def _overpass_fetch(query: str) -> list[dict]:

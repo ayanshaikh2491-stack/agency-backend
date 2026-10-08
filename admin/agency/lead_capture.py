@@ -235,6 +235,73 @@ def parse_sba_targets(text: str) -> list[dict[str, str]]:
     return out
 
 
+async def capture_osm_leads(
+    osm_leads: list[dict[str, Any]],
+    workspace_id: str = "",
+) -> dict[str, Any]:
+    """Import structured OpenStreetMap leads straight into the store.
+
+    This is the path that actually produces contactable leads. The SBA agent's
+    prose output is a transcription of what the tool returned, and a transcription
+    can drop the phone number or misspell the website. These rows are the tool's
+    own values, so they carry phone and website exactly as OpenStreetMap has
+    them.
+
+    Never raises. A lead already on file is skipped rather than duplicated.
+    """
+    report: dict[str, Any] = {"imported": 0, "created": 0, "skipped_duplicate": 0, "error": None}
+    try:
+        rows = [r for r in (osm_leads or []) if isinstance(r, dict) and (r.get("name") or r.get("business_name"))]
+        report["imported"] = len(rows)
+        if not rows:
+            return report
+
+        from admin.agency.sba_store import create_lead, list_leads
+
+        existing = {_norm_key(l.get("business_name") or l.get("name") or "")
+                    for l in list_leads()}
+
+        for row in rows:
+            name = str(row.get("business_name") or row.get("name") or "").strip()
+            key = _norm_key(name)
+            if not key or key in existing:
+                report["skipped_duplicate"] += 1
+                continue
+            phone = str(row.get("phone") or "").strip()
+            website = str(row.get("website") or "").strip()
+            email = str(row.get("email") or "").strip()
+            await create_lead({
+                "business_name": name,
+                "name": name,
+                "city": str(row.get("city") or ""),
+                "state": str(row.get("state") or ""),
+                "website": website,
+                "phone": phone,
+                "email": email,
+                "source": "osm_overpass",
+                "status": "new",
+                # Contactable means we can actually reach them.
+                "score": 75 if (phone or email) else 55,
+                "notes": [],
+                "context": {
+                    "city": str(row.get("city") or ""),
+                    "category": str(row.get("category") or ""),
+                    "address": str(row.get("address") or ""),
+                    "lat": row.get("lat"),
+                    "lon": row.get("lon"),
+                    "origin": "ceo_autonomy.bootstrap_prospecting",
+                    "source": "osm_overpass",
+                    "verified": bool(phone or email or website),
+                    "confidence": "business exists in OpenStreetMap with contact data",
+                },
+            })
+            existing.add(key)
+            report["created"] += 1
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+    return report
+
+
 async def capture_leads_from_sba(
     text: str,
     workspace_id: str = "",
