@@ -2,53 +2,49 @@
 db_diagnose: _ROOT = /app
 cwd         = /app
 token set   = True
-key set     = True
+key set     = False
 ======================================================================
 
 --- tags_agency_workspace.db
     expected path : /app/tags_agency_workspace.db
-    exists        : True
-    size          : 212992
-    is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x04\x00\x00\x004'
-    is sqlite     : True
-    tables        : 17
-    integrity     : ok
+    exists        : False
 
 --- tags_agency.db
     expected path : /app/tags_agency.db
-    exists        : True
-    size          : 69632
-    is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x01\x01\x00@  \x00\x00\x00\x95\x00\x00\x00\x11'
-    is sqlite     : True
-    tables        : 3
-    integrity     : ok
+    exists        : False
 
 --- freeapi.db
     expected path : /app/server/data/freeapi.db
-    exists        : False
+    exists        : True
+    size          : 16384
+    is file       : True
+    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x02\x00\x00\x00\x04'
+    is sqlite     : True
+    tables        : 2
+    integrity     : ok
 
 ======================================================================
 every .db file visible under the app root
 ======================================================================
-       69632  sqlite=True   /app/tags_agency.db
-      212992  sqlite=True   /app/tags_agency_workspace.db
+       16384  sqlite=True   /app/node_modules/@freellmapi/server/data/freeapi.db
+       16384  sqlite=True   /app/server/data/freeapi.db
 
 ======================================================================
 sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
 ======================================================================
-       32768  /app/tags_agency_workspace.db-shm
-           0  /app/tags_agency_workspace.db-wal
+       32768  /app/node_modules/@freellmapi/server/data/freeapi.db-shm
+           0  /app/node_modules/@freellmapi/server/data/freeapi.db-wal
+       32768  /app/server/data/freeapi.db-shm
+           0  /app/server/data/freeapi.db-wal
 ======================================================================
 key fingerprint
 ======================================================================
-  ENCRYPTION_KEY set   : True
-  ENCRYPTION_KEY len   : 64
-  sha256(ENCRYPTION_KEY): 73f41222a4582b04786405622dcc25883e23a6bb5175be0eeb03fb18a1573e1c
-  _backup_key() hex    : 73f41222a4582b04786405622dcc25883e23a6bb5175be0eeb03fb18a1573e1c
+  ENCRYPTION_KEY set   : False
+  ENCRYPTION_KEY len   : 0
+  sha256(ENCRYPTION_KEY): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  _backup_key() hex    : c52bdf056740d443a18a67df5c9285b31f6da9ca943888191b85f8770de62bbf
   vector plaintext     : b'SQLite format 3\x00AGENCY-KEY-TEST-VECTOR'
   pinned nonce         : 000102030405060708090a0b0c0d0e0f
-  vector ciphertext    : f365176f5c870f0cb108be14f6ca1102640c3e866dc50b27d272a06c2ed5028ebf45b0025f4b
+  vector ciphertext    : 9bfc300ee115431438b1df79d415c0fa1e52b7753e923f57178b6a03833e983670a96b6a44d9
   Recompute this locally with the same key. If it differs, the
   container is using a different key than the one you expect.
