@@ -266,6 +266,9 @@ async def capture_leads_from_sba(
             await create_lead({
                 "business_name": c["business_name"],
                 "name": c["business_name"],
+                # city is a top-level LeadModel column, not context. It is also
+                # mirrored into context because callers read both shapes.
+                "city": c.get("city", ""),
                 "source": c["source"],
                 "status": "new",
                 "score": 60,

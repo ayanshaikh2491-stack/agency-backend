@@ -11,6 +11,7 @@ returns an empty list, because that is indistinguishable, from the outside, from
 """
 import asyncio
 import sys
+import unittest.mock
 
 sys.path.insert(0, ".")
 
@@ -153,6 +154,71 @@ def test_a_field_label_is_not_mistaken_for_a_city():
     lead = parse_sba_targets(text)[0]
     assert lead["city"] == ""
     assert lead["pain_point"].startswith("replies only after 6 pm")
+
+
+def test_city_is_written_to_the_top_level_column_not_only_context(monkeypatch):
+    """`city` is a real column on LeadModel. It was written only into context,
+    so every stored lead had an empty city column and the field could not be
+    searched or filtered on at all."""
+    created = []
+
+    async def fake_create_lead(data):
+        created.append(data)
+
+    import admin.agency.sba_store as store
+    monkeypatch.setattr(store, "create_lead", fake_create_lead)
+    monkeypatch.setattr(store, "list_leads", lambda: [])
+
+    text = ("1. Dr. Mehta's Dental Clinic – Pune. Pain-point: no-shows at 22 %. "
+            "Hook: \"Let us chase them automatically.\"")
+    rep = asyncio.run(capture_leads_from_sba(text, workspace_id="ws1"))
+    assert rep["created"] == 1
+    assert created[0]["city"] == "Pune"
+    assert created[0]["context"]["city"] == "Pune"
+
+
+def test_create_lead_persists_city_instead_of_dropping_it():
+    """sba_store.create_lead built its record without city/state/website, so a
+    caller passing city had it silently discarded before it reached the model."""
+
+    async def _noop_event(*_a, **_k):
+        return None
+
+    from admin.agency import sba_store
+
+    class _NoSession:
+        """A session that accepts the write and fails the commit, so the
+        rollback path runs exactly as it would in production."""
+
+        def add(self, _obj):
+            pass
+
+        async def commit(self):
+            raise RuntimeError("no database in this test")
+
+        async def rollback(self):
+            pass
+
+        async def close(self):
+            pass
+
+    async def _no_session():
+        return _NoSession()
+
+    with unittest.mock.patch.object(sba_store, "_get_session", _no_session), \
+            unittest.mock.patch("admin.agency.ceo_autonomy.emit_event",
+                                new=_noop_event):
+        lead = asyncio.run(sba_store.create_lead({
+            "business_name": "Sample Clinic",
+            "name": "Sample Clinic",
+            "city": "Indore",
+            "state": "MP",
+            "website": "https://example.test",
+        }))
+
+    assert lead["city"] == "Indore"
+    assert lead["state"] == "MP"
+    assert lead["website"] == "https://example.test"
 
 
 def test_capture_persists_and_dedupes(monkeypatch):

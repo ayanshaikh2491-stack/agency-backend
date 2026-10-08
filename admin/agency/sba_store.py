@@ -77,6 +77,13 @@ async def create_lead(data: dict[str, Any]) -> dict[str, Any]:
         "business_name": data.get("business_name", ""),
         "email": data.get("email", ""),
         "phone": data.get("phone", ""),
+        # city/state/website are real columns on LeadModel, not context noise.
+        # They were absent here, so every lead the CEO created stored an empty
+        # city no matter what the caller passed, and the column could never be
+        # searched, filtered or grouped on.
+        "city": data.get("city", "") or "",
+        "state": data.get("state", "") or "",
+        "website": data.get("website", "") or "",
         "source": data.get("source", "manual"),
         "score": data.get("score", 50),
         "status": data.get("status", "new"),
