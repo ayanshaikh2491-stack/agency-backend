@@ -1269,8 +1269,12 @@ class CEOAutonomy:
                                     "B2B service businesses: dentists, physiotherapists, yoga coaches, "
                                     "local SaaS founders). Each agent contributes ONE piece, then the "
                                     "CEO merges: "
-                                    "[SBA] -> research 5 high-fit target accounts: business name, city, "
-                                    "pain-point our AI agents solve, warm-outreach hook. "
+                                    "[SBA] -> research 5 high-fit target accounts. TARGET "
+                                    "CITIES MUST BE IN INDIA - tier 1 or tier 2 only (Pune, "
+                                    "Indore, Jaipur, Lucknow, Nagpur, Surat, Coimbatore, "
+                                    "Bhopal, Patna). Do NOT invent US or European businesses. "
+                                    "For each: business name, city, pain-point our AI agents "
+                                    "solve, warm-outreach hook. "
                                     "[CONTENT] -> write a 150-word hook blog/intro paragraph for the "
                                     "chosen niche. "
                                     "[WEBSITE] -> draft a 3-section landing page outline (hero, "
@@ -1426,6 +1430,39 @@ class CEOAutonomy:
             "results": results,
             "errors": errors,
         }
+
+        # Close the loop that was never closed. The SBA agent researches target
+        # accounts and returns prose; until now that prose only ever landed in a
+        # task row. `total_leads` therefore stayed 0 forever, the heartbeat kept
+        # seeing an empty pipeline, and it kept re-dispatching prospecting --
+        # nineteen identical runs, zero leads, while every one of them reported
+        # "done". Without this the agents can do excellent work that never
+        # becomes pipeline.
+        #
+        # Failure here must not change `status`: the orchestration genuinely
+        # succeeded even if lead capture did not. capture_leads_from_sba never
+        # raises and reports what it did instead.
+        sba_output = (results or {}).get("sba")
+        if sba_output and not errors.get("sba"):
+            try:
+                from admin.agency.lead_capture import capture_leads_from_sba
+
+                report = await capture_leads_from_sba(
+                    sba_output if isinstance(sba_output, str) else str(sba_output),
+                    workspace_id=workspace_id,
+                )
+                merged["lead_capture"] = report
+                if report.get("created"):
+                    logger.info(
+                        "CEO orchestration %s captured %d new lead(s) from SBA output",
+                        orch_id, report["created"])
+                elif report.get("error"):
+                    logger.warning(
+                        "CEO orchestration %s lead capture failed: %s",
+                        orch_id, report["error"])
+            except Exception as exc:
+                merged["lead_capture"] = {"error": _safe_error(exc)}
+
         await emit_event(
             "agent.output",
             workspace_id=workspace_id,
