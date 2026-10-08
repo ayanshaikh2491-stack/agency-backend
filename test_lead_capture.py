@@ -127,6 +127,34 @@ def test_business_name_ending_in_a_qualifier_word_is_not_split():
     assert leads[0]["city"] == "Denver, CO"
 
 
+def test_live_string_where_city_shares_the_field_with_prose():
+    """Verbatim shape from the first live capture round, where every lead came
+    back with city=(none) and pain starting "ProHealth Dental Nagpur.".
+
+    The city sits at the head of the field but the sentence continues after it,
+    so _CITY_RE rejected the whole field and the business name and city were
+    both swallowed into the pain point."""
+    text = ("1. ProHealth Dental – Nagpur. Pain-point: owner responds only on "
+            "weekends; leads book competitors. Hook: \"You're losing ~8 leads/week "
+            "to the clinic 2 streets away that replies same-day.\"")
+    leads = parse_sba_targets(text)
+    assert len(leads) == 1
+    lead = leads[0]
+    assert lead["business_name"] == "ProHealth Dental"
+    assert lead["city"] == "Nagpur"
+    assert not lead["pain_point"].startswith("-point")
+    assert lead["pain_point"].startswith("owner responds only on weekends")
+    assert lead["hook"].startswith("You're losing ~8 leads/week")
+
+
+def test_a_field_label_is_not_mistaken_for_a_city():
+    """No dash separator at all, so the second field is the pain text itself."""
+    text = "1. Bright Smile Dental Pain: replies only after 6 pm, calls roll over."
+    lead = parse_sba_targets(text)[0]
+    assert lead["city"] == ""
+    assert lead["pain_point"].startswith("replies only after 6 pm")
+
+
 def test_capture_persists_and_dedupes(monkeypatch):
     created = []
 

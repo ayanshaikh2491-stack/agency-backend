@@ -42,6 +42,15 @@ _CITY_RE = re.compile(r"^[A-Z][A-Za-z .'-]{1,28}(?:\s*,\s*[A-Z]{2})?$")
 # "<business> <City> (qualifier)" as the models actually write it.
 _EMBEDDED_CITY_RE = re.compile(
     r"^(?P<name>.+?)\s+(?P<city>[A-Z][a-z]{2,15})\s*\([^)]*\)\s*$")
+# A city at the start of the field after the name, followed by more prose:
+# "Nagpur. Pain-point: ..." did not match _CITY_RE because the rest of the
+# sentence rode along, which left city empty for every live lead captured so far.
+_CITY_LEAD_RE = re.compile(r"^([A-Z][a-z]{2,15}(?:\s*,\s*[A-Z]{2})?)\s*[.·–—-]?\s*")
+# Leading words that look like a capitalised token but are field labels.
+_NOT_A_CITY = frozenset({
+    "pain", "hook", "niche", "tag", "tags", "note", "notes", "ready",
+    "merging", "the", "this", "these", "our", "we", "it", "they", "their",
+})
 _STAR = re.compile(r"\*\*")
 _QUOTES = "\"'“”‘’"
 _LEAD_NOISE = re.compile(
@@ -72,11 +81,24 @@ def _split_fields(chunk: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+_LABEL_SPLIT_RE = re.compile(r"\s*(?:Pain|Hook|Niche)\s*[-–—]?\s*(?:point)?\s*:?\s*")
+
+
+def _split_fields_on_label(chunk: str) -> list[str]:
+    """Fallback split for "Bright Smile Dental Pain: ..." with no separator."""
+    parts = [p.strip() for p in _LABEL_SPLIT_RE.split(chunk) if p and p.strip()]
+    return parts if len(parts) >= 2 else []
+
+
 def _parse_list_line(line: str) -> dict[str, Any] | None:
     m = _LIST_ITEM_RE.match(line)
     if not m:
         return None
     parts = _split_fields(m.group(2))
+    if len(parts) < 2:
+        # No separator at all. The model sometimes just runs the name into a
+        # "Pain:" label instead, so fall back to splitting on the label.
+        parts = _split_fields_on_label(m.group(2))
     if len(parts) < 2:
         return None
 
@@ -88,20 +110,44 @@ def _parse_list_line(line: str) -> dict[str, Any] | None:
     # lead is searchable by city and the name is not polluted.
     name, embedded_city = _split_embedded_city(name)
 
+    # `tail` is everything after the name. Tracked separately from `parts`
+    # because the name has to be dropped from it exactly once, and getting
+    # that wrong silently prepends the business name to the pain point.
+    tail_parts = parts[1:]
+
     if len(parts) >= 2 and _CITY_RE.match(_clean(parts[1])):
         city = _clean(parts[1])
-        # Consume both the name and the city. Advancing by one instead of two
-        # left the city in the tail, which then became the pain point.
-        parts = parts[2:]
+        tail_parts = parts[2:]
     elif embedded_city:
         city = embedded_city
-        parts = parts[1:]
+    elif len(parts) >= 2:
+        # The city is the first token of the second field but shares it with
+        # the rest of the sentence, so _CITY_RE rejected the whole field.
+        lead_city, remainder = _split_leading_city(parts[1])
+        if lead_city:
+            city = lead_city
+            tail_parts = [remainder]
 
-    tail = " ".join(parts)
-    pain, hook = _split_pain_hook(tail)
+    pain, hook = _split_pain_hook(" ".join(tail_parts))
     if not name:
         return None
     return {"business_name": name, "city": city, "pain_point": pain, "hook": hook}
+
+
+def _split_leading_city(text: str) -> tuple[str, str]:
+    """Pull a city off the front of a field that continues into prose.
+
+    Returns ("", original) when the leading token is a field label such as
+    "Pain" rather than a place.
+    """
+    m = _CITY_LEAD_RE.match(text or "")
+    if not m:
+        return "", text
+    candidate = m.group(1).strip()
+    if candidate.lower() in _NOT_A_CITY:
+        return "", text
+    remainder = (text[m.end():] or "").strip(" .;:-")
+    return candidate, remainder
 
 
 def _split_embedded_city(name: str) -> tuple[str, str]:
@@ -153,7 +199,11 @@ def _split_pain_hook(text: str) -> tuple[str, str]:
         quoted = re.findall(r"[\"“']([^\"“”']{25,})[\"”']", text)
         if quoted:
             hook = _clean(quoted[-1])
-    pain = re.sub(r"\bPain:?\s*", "", text, flags=re.I).strip(" .;,-")
+    # "Pain:", "Pain -", and "Pain-point:" all appear. Stripping only "Pain:"
+    # left the "-point:" suffix glued to the front of the pain text, which is
+    # exactly what the first live captures stored.
+    pain = re.sub(r"\bPain\s*[-–—]?\s*(?:point)?\s*:?\s*", "", text, flags=re.I)
+    pain = pain.strip(" .;,-")
     return _clean(pain), hook
 
 
