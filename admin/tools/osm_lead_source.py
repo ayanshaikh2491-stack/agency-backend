@@ -194,15 +194,45 @@ def _overpass_fetch(query: str) -> list[dict]:
     return []
 
 
-def _osm_to_lead(el: dict, category: str, city: str, state: str) -> dict | None:
+# Dialing prefixes for a bare 10-digit local number. The agency sells into
+# Indian tier-1/2 cities, and "+1" is the United States country code, so a
+# Pune clinic's 9425715707 was being stored as "+1-9425715707" - a number that
+# cannot be dialled anywhere. Numbers that already carry a "+" or a leading 0
+# are left alone.
+_COUNTRY_PREFIX = {
+    "in": "+91", "india": "+91",
+    "us": "+1", "usa": "+1",
+}
+
+
+def _country_prefix(country: str) -> str:
+    return _COUNTRY_PREFIX.get((country or "").strip().lower(), "+91")
+
+
+def _normalise_phone(phone: str, country: str) -> str:
+    """Put a bare local number into international form.
+
+    A bare 10-digit number is country-dependent, so the prefix has to come from
+    the country rather than being hardcoded to the US.
+    """
+    phone = (phone or "").strip()
+    if not phone or phone.startswith("+"):
+        return phone
+    digits = phone.replace("-", "").replace(" ", "")
+    if re.match(r"^\d{10}$", digits):
+        return f"{_country_prefix(country)}-{phone}"
+    return phone
+
+
+def _osm_to_lead(el: dict, category: str, city: str, state: str,
+                 country: str = "in") -> dict | None:
     """Convert an OSM element into the shared normalized lead shape."""
     t = el.get("tags") or {}
     name = (t.get("name") or "").strip()
     if not name:
         return None
     phone = (t.get("phone") or t.get("contact:phone") or t.get("phone:contact") or "").strip()
-    if phone and not phone.startswith("+") and re.match(r"^\d{10}$", phone.replace("-", "").replace(" ", "")):
-        phone = "+1-" + phone
+    phone = _normalise_phone(phone, country)
     website = (t.get("website") or t.get("contact:website") or t.get("url") or "").strip()
     if website and not website.startswith("http"):
         website = "https://" + website
@@ -243,6 +273,7 @@ def find_leads_osm(
     city: str,
     state: str,
     max_results: int = 8,
+    country: str = "in",
 ) -> list[dict]:
     """Find local-business leads via OSM Overpass (no Chrome, no API key).
 
@@ -258,7 +289,7 @@ def find_leads_osm(
     leads: list[dict] = []
     seen_names: set[str] = set()
     for el in elements:
-        lead = _osm_to_lead(el, category, city, state)
+        lead = _osm_to_lead(el, category, city, state, country)
         if not lead:
             continue
         key = lead["name"].lower()

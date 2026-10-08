@@ -63,6 +63,14 @@ class LeadCreate(BaseModel):
     business_name: str = ""
     email: str = ""
     phone: str = ""
+    # These are columns on LeadModel and were missing here, so every POST
+    # silently dropped them. Pydantic ignores unknown fields rather than
+    # erroring, so a caller passing city got no warning and no city. That is
+    # how the first fifteen real OSM leads landed with an empty city column
+    # while the response looked successful.
+    city: str = ""
+    state: str = ""
+    website: str = ""
     source: str = "manual"
     score: int = 50
     notes: list = []
@@ -74,8 +82,6 @@ class LeadUpdate(BaseModel):
     business_name: str | None = None
     email: str | None = None
     phone: str | None = None
-    city: str | None = None
-    state: str | None = None
     score: int | None = None
     status: str | None = None
     notes: list | None = None
@@ -319,102 +325,6 @@ async def sba_chat(body: dict):
 async def api_list_sba_skills():
     """List all skills available to SBA agent."""
     return {"success": True, "data": {"skills": list_sba_skills()}}
-
-
-# ── Outreach draft preview (boss review gate) ────────────────────────────────
-
-
-@router.get("/outreach/preview")
-async def api_outreach_preview(limit: int = 5):
-    """Draft cold emails for the newest 'new'-status leads WITHOUT sending.
-
-    Boss-review gate: the autopilot's real drafts (same draft_email the live
-    pipeline uses), rendered for human approval. Nothing is sent, saved, or
-    queued — status changes never happen here.
-    """
-    from admin.tools.sba_email_draft import draft_email
-
-    leads = _load_leads_preferred()
-    fresh = [l for l in leads if l.get("status") in ("new", "candidate")]
-    fresh = sorted(fresh, key=lambda l: str(l.get("created_at") or ""), reverse=True)
-    out = []
-    for lead in fresh[:limit]:
-        try:
-            subject, body = await draft_email(lead, angle=None)
-            source = "llm"
-        except Exception:  # noqa: BLE001
-            subject, body = None, None
-            source = "error"
-        out.append({
-            "lead_id": lead.get("id"),
-            "name": lead.get("name"),
-            "status": lead.get("status"),
-            "score": lead.get("score"),
-            "city": lead.get("city"),
-            "email": lead.get("email") or "(email enrichment pending)",
-            "subject": subject,
-            "body": body,
-            "drafted_by": source,
-        })
-    return {
-        "success": True,
-        "data": {
-            "preview_count": len(out),
-            "note": "Preview only — nothing sent, queued, or saved.",
-            "drafts": out,
-        },
-    }
-
-
-@router.post("/outreach/send")
-async def api_outreach_send(lead_id: str):
-    """Send ONE real cold email to ONE lead (boss-approved direct blast).
-
-    The surgical path: LLM-drafted (same draft_email the autopilot uses,
-    anti-fake-claims prompt), sent live via the owner's Gmail SMTP with owner
-    CC, then the lead is marked 'contacted' + a note is recorded. No
-    enrichment loop, no agent round-trips — this exists so the FIRST real
-    email can go out and be verified end-to-end in seconds.
-    """
-    lead = get_lead(lead_id)
-    if not lead:
-        raise HTTPException(404, f"Lead not found: {lead_id}")
-    if not (lead.get("email") or "").strip():
-        return {"success": False, "error": "lead has no email address"}
-    if lead.get("status") not in ("new", "candidate"):
-        return {"success": False, "error": f"already {lead.get('status')} — not re-sending"}
-
-    from admin.tools.sba_email_client import SBAEmailClient, build_workspace_email_client
-    from admin.tools.sba_email_draft import draft_email
-
-    subject, body = await draft_email(lead, angle=None)
-    # Workspace-config creds first; fall back to agency env creds (TAGS_SMTP_*).
-    # build_workspace_email_client alone returns a DISABLED client when the
-    # workspace config has no smtp fields — that silently failed the first blast.
-    client = build_workspace_email_client("agency")
-    if not client.enabled:
-        client = SBAEmailClient()
-    ok = await client.send_email(
-        to_email=lead["email"], subject=subject, body_text=body, cc_owner=True,
-    )
-    if not ok:
-        return {"success": False, "error": "SMTP send failed (check TAGS_SMTP_* env + Gmail App Password)"}
-
-    await update_lead(lead_id, {
-        "status": "contacted",
-        "notes": [{"text": f"Cold email sent via /outreach/send: '{subject}'"}],
-    })
-    _mirror_lead(get_lead(lead_id) or lead)
-    return {
-        "success": True,
-        "data": {
-            "lead_id": lead_id,
-            "to": lead["email"],
-            "subject": subject,
-            "body": body,
-            "note": "Sent live via SMTP with owner CC. Lead marked contacted.",
-        },
-    }
 
 
 # ── Leads CRUD ──────────────────────────────────────────────────────────────
@@ -1416,11 +1326,11 @@ class SendLeadEmailRequest(BaseModel):
 
 @router.post("/email/send-lead")
 async def sba_email_send_lead(payload: SendLeadEmailRequest):
-    """Send an email to a lead using the new SBAEmailClient (App Password)."""
-    from admin.tools.sba_email_client import SBAEmailClient
-    client = SBAEmailClient()
+    """Send an email to a lead from the SBA agent's own AgentMail inbox."""
+    from admin.tools.agentmail_client import AgentMailEmailClient
+    client = AgentMailEmailClient("sba")
     if not client.enabled:
-        return {"success": False, "error": "Email not configured. Set SBA_OWNER_EMAIL and SBA_OWNER_EMAIL_PASSWORD in .env"}
+        return {"success": False, "error": "AgentMail is not configured"}
     sent = await client.send_email(
         to_email=payload.to_email,
         subject=payload.subject,
@@ -1431,11 +1341,11 @@ async def sba_email_send_lead(payload: SendLeadEmailRequest):
 
 @router.post("/email/check-replies")
 async def sba_email_check_replies(mark_read: bool = True):
-    """Check inbox for lead replies using new SBAEmailClient with LLM enrichment."""
-    from admin.tools.sba_email_client import SBAEmailClient
-    client = SBAEmailClient()
+    """Check the SBA agent's AgentMail inbox for lead replies."""
+    from admin.tools.agentmail_client import AgentMailEmailClient
+    client = AgentMailEmailClient("sba")
     if not client.enabled:
-        return {"success": False, "error": "Email not configured"}
+        return {"success": False, "error": "AgentMail is not configured"}
     replies = await client.check_replies(mark_read=mark_read)
     return {"success": True, "data": {"replies": replies, "count": len(replies)}}
 

@@ -94,3 +94,43 @@ def test_query_escapes_a_quote_in_the_city_name():
     """A stray quote would break the query and silently return nothing."""
     q = osm._geo_area_filter('Pune"s', "")
     assert '"Punes"' in q
+
+
+def test_indian_local_numbers_get_the_indian_country_code():
+    """The bug: a bare 10-digit number was stored as +1-..., which is the United
+    States country code and cannot be dialled from India. Pune's 9425715707 was
+    being stored as +1-9425715707."""
+    assert osm._normalise_phone("9425715707", "in") == "+91-9425715707"
+    assert osm._normalise_phone("9425715707", "IN") == "+91-9425715707"
+    assert osm._normalise_phone("9425715707", "india") == "+91-9425715707"
+
+
+def test_us_behaviour_is_preserved_for_a_us_country():
+    assert osm._normalise_phone("5125550123", "us") == "+1-5125550123"
+
+
+def test_numbers_that_already_carry_a_prefix_are_left_alone():
+    """Re-prefixing an already-international number corrupts it."""
+    for value in ("+91 20 3240 012", "+919373965004", "07312572225", ""):
+        assert osm._normalise_phone(value, "in") == value
+
+
+def test_a_bare_indian_number_reaches_the_lead_with_the_right_prefix():
+    el = {"tags": {"name": "Thaper Dental Clinic", "phone": "9425715707"}}
+    lead = osm._osm_to_lead(el, "dentist", "Pune", "Maharashtra", "in")
+    assert lead["phone"] == "+91-9425715707"
+    assert lead["city"] == "Pune"
+    assert lead["verified"] is True
+
+
+def test_lead_create_schema_accepts_city_state_and_website():
+    """Pydantic ignores unknown fields, so a caller passing city got a
+    successful-looking response and an empty city column."""
+    from admin.api.routes.sba import LeadCreate
+
+    lead = LeadCreate(name="X", city="Pune", state="Maharashtra",
+                      website="https://example.test", phone="+91-9425715707")
+    dumped = lead.model_dump()
+    assert dumped["city"] == "Pune"
+    assert dumped["state"] == "Maharashtra"
+    assert dumped["website"] == "https://example.test"
