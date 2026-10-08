@@ -134,3 +134,27 @@ def test_lead_create_schema_accepts_city_state_and_website():
     assert dumped["city"] == "Pune"
     assert dumped["state"] == "Maharashtra"
     assert dumped["website"] == "https://example.test"
+
+
+def test_force_sync_endpoint_exists():
+    """The data-loss window. The database is container-local SQLite, so a deploy
+    between periodic snapshots restores a snapshot that predates recent writes.
+    Fifteen real leads were lost that way. This is the way to snapshot first."""
+    import inspect
+
+    from admin.api.routes import sba
+
+    fn = getattr(sba, "api_force_db_sync", None)
+    assert fn is not None, "no force-sync endpoint"
+    assert "db_backup" in inspect.getsource(fn)
+
+
+def test_backup_interval_is_short_enough():
+    """20 minutes was the window that lost fifteen leads. Read from start.sh so
+    this fails if the interval is widened again."""
+    import os
+
+    start_sh = os.path.join(os.path.dirname(__file__), "start.sh")
+    text = open(start_sh, encoding="utf-8").read()
+    assert "sleep 480" in text, "backup interval is no longer 8 minutes"
+    assert "sleep 1200" not in text, "the old 20 minute interval is back"

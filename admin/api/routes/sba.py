@@ -482,6 +482,33 @@ async def api_backup_all():
     return {"success": True, "data": backup_all()}
 
 
+@router.post("/db-sync")
+async def api_force_db_sync():
+    """Push the database snapshot to the backup branch immediately.
+
+    The container's database is container-local SQLite: every deploy replaces
+    the filesystem, and the only thing that survives is the snapshot on the
+    backup branch, which start.sh restores on boot. That snapshot is otherwise
+    refreshed every 20 minutes, so any deploy in that window restores a stale
+    copy and silently discards everything written since the last sync.
+
+    This was not theoretical. Fifteen real leads imported from OpenStreetMap
+    were lost this way: imported, deployed two minutes later, and the boot
+    restore brought back a snapshot from before they existed.
+
+    Call this before a deploy, and after any bulk write worth keeping.
+    """
+    import asyncio
+
+    try:
+        from admin.db_backup import sync as _sync
+
+        pushed = await asyncio.to_thread(_sync)
+        return {"success": True, "pushed": pushed}
+    except Exception as e:
+        return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+
 # ── Handoff (SBA → CEO) ────────────────────────────────────────────────────
 
 

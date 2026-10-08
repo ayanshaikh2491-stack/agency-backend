@@ -214,18 +214,24 @@ for s in seeds:
 ) &
 echo "[start] CEO schedule seed started (background)"
 
-# ── Periodic DB backup to GitHub data branch (every 20 min) ──────────────────
+# ── Periodic DB backup to GitHub data branch (every 8 min) ───────────────────
 # Same reasoning as the restore above: default it, or an unset backup token is
 # a fatal error rather than a disabled feature.
+#
+# This interval is the size of the data-loss window on a deploy. The database is
+# container-local SQLite, so a deploy outside this window restores a snapshot
+# that predates recent writes. It was 20 minutes, and that is how fifteen real
+# leads were lost: written, then deployed two minutes later. Shortened to 8.
+# POST /api/sba/db-sync forces an immediate snapshot when a deploy is imminent.
 if [ -n "${GH_BACKUP_TOKEN:-}" ]; then
   (
     while true; do
-      sleep 1200
+      sleep 480
       python -m admin.db_backup sync || echo "[start] WARN: periodic db sync failed"
     done
   ) &
   SYNC_PID=$!
-  echo "[start] db backup loop started (every 20 min, pid=$SYNC_PID)"
+  echo "[start] db backup loop started (every 8 min, pid=$SYNC_PID)"
 fi
 
 # ── Periodic KV backup (every 5 min) ────────────────────────────────────────
