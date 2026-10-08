@@ -482,6 +482,38 @@ async def api_backup_all():
     return {"success": True, "data": backup_all()}
 
 
+@router.api_route("/unsubscribe", methods=["GET", "POST"])
+async def api_unsubscribe(email: str = ""):
+    """Honour an unsubscribe so the sender never gets filtered.
+
+    Gmail and Yahoo require a working one-click List-Unsubscribe from any bulk
+    sender, and they fetch this URL automatically when the reader clicks
+    unsubscribe. An advertised unsubscribe that does not work is worse than none:
+    it is evidence of a sender that ignores the request.
+
+    Takes GET and POST because RFC 8058 specifies a POST from the provider.
+    Suppression is permanent rather than a pause, because a person who asked to
+    stop hearing from this agency should not have to ask twice.
+    """
+    addr = (email or "").strip().lower()
+    if not addr or "@" not in addr:
+        return {"success": False, "error": "email required"}
+    try:
+        from admin.agency.sba_store import update_lead
+
+        _ = update_lead
+    except Exception:
+        pass
+    try:
+        from admin.agency.suppression import suppress
+
+        suppress(addr, reason="recipient_unsubscribed")
+        return {"success": True, "email": addr}
+    except Exception as e:
+        logger.warning("unsubscribe failed for %s: %s", addr, e)
+        return {"success": False, "error": "could not record"}
+
+
 @router.post("/db-sync")
 async def api_force_db_sync():
     """Push the database snapshot to the backup branch immediately.

@@ -1,7 +1,7 @@
-"""SBA Email Client — Send/Receive via owner's email (App Password).
+"""Email clients for SBA workflows.
 
-Owner configures Gmail/Yahoo/Outlook app password. SBA uses SMTP to send,
-IMAP to check replies, and LLM to enrich lead responses.
+Active agent paths use the AgentMail adapter. The legacy SBAEmailClient below
+remains available only for non-agent owner SMTP compatibility.
 """
 
 from __future__ import annotations
@@ -10,8 +10,7 @@ import asyncio
 import json
 import logging
 import os
-import smtplib
-import imaplib
+import urllib.parse
 import email as email_lib
 from email.header import decode_header
 from email.mime.text import MIMEText
@@ -20,6 +19,7 @@ from typing import Any
 
 import openai
 from admin.config import settings
+from admin.tools.agentmail_client import AgentMailEmailClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +32,38 @@ OWNER_EMAIL = (
     os.environ.get("SBA_OWNER_EMAIL", "")
     or os.environ.get("TAGS_SMTP_EMAIL", "")
 )
-OWNER_EMAIL_PASSWORD = (  # App Password
-    os.environ.get("SBA_OWNER_EMAIL_PASSWORD", "")
-    or os.environ.get("TAGS_SMTP_PASSWORD", "")
+# Legacy SMTP support is explicit-only: agent paths never inherit or read
+# owner SMTP credentials from the environment.
+def _legacy_smtp_password(password: str | None) -> str:
+    return (password or "").strip()
+
+
+UNSUBSCRIBE_BASE = (
+    os.environ.get("PUBLIC_BASE_URL", "https://agency-backend-v2.onrender.com").rstrip("/")
 )
+
+
+def _unsubscribe_headers(to_email: str) -> dict[str, str]:
+    """RFC 2369 headers so a recipient can stop receiving mail with one click.
+
+    Both forms are emitted. The HTTPS entry is what the mail provider fetches
+    automatically on a one-click unsubscribe, and it carries
+    List-Unsubscribe-Post so the provider knows an HTTP POST is expected. The
+    mailto entry covers clients that will not make that call. Colossus emits the
+    same pair, and it is why its mail survives filtering at volume.
+    """
+    base = UNSUBSCRIBE_BASE
+    if not base:
+        return {}
+    addr = (to_email or "").strip()
+    https = f"{base}/api/sba/unsubscribe?email={urllib.parse.quote(addr)}"
+    mailto = f"mailto:unsubscribe@{urllib.parse.urlparse(base).netloc}?subject=unsubscribe%20{urllib.parse.quote(addr)}"
+    return {
+        "List-Unsubscribe": f"<{https}>, <{mailto}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+
+
 OWNER_NAME = os.environ.get("SBA_OWNER_NAME", "Ayan")
 SMTP_HOST = os.environ.get("SBA_SMTP_HOST", os.environ.get("TAGS_SMTP_HOST", "smtp.gmail.com"))
 SMTP_PORT = int(os.environ.get("SBA_SMTP_PORT", os.environ.get("TAGS_SMTP_PORT", "587")))
@@ -43,48 +71,31 @@ IMAP_HOST = os.environ.get("SBA_IMAP_HOST", "imap.gmail.com")
 IMAP_PORT = int(os.environ.get("SBA_IMAP_PORT", "993"))
 
 
-def build_workspace_email_client(workspace_name: str = "agency") -> SBAEmailClient:
-    """Pick the right inbox for a workspace.
+def build_workspace_email_client(workspace_name: str = "agency") -> AgentMailEmailClient:
+    """Return the SBA agent's own AgentMail inbox for any workspace.
 
-    - ``agency``: env creds (SBA_OWNER_EMAIL / SBA_OWNER_EMAIL_PASSWORD).
-    - client workspace: its OWN ``smtp_email`` + ``smtp_password`` from the
-      workspace config. If the client has no creds yet, email is DISABLED so
-      we never accidentally send from the agency inbox on a client's behalf.
+    Workspace identity remains the SBA actor; no SMTP credentials or client
+    mailbox password is read here. The optional owner address is only used as a
+    BCC destination when a caller requests ``cc_owner=True``.
     """
-    if not workspace_name or workspace_name == "agency":
-        return SBAEmailClient()
-    try:
-        from admin.agency import sba_biztypes as biztypes
-        cfg = biztypes.get_workspace_config(workspace_name)
-    except Exception:  # noqa: BLE001
-        logger.warning("workspace config missing for %r, email disabled", workspace_name)
-        return SBAEmailClient(email="", password="")
-    ws_email = (str(cfg.get("smtp_email") or "").strip()
-                or str(cfg.get("owner_email") or "").strip())
-    ws_pass = str(cfg.get("smtp_password") or "").strip()
-    if not (ws_email and ws_pass):
-        logger.warning(
-            "Workspace %r has no smtp_email/smtp_password yet — SBA email disabled "
-            "so it never uses the agency inbox.", workspace_name
-        )
-        return SBAEmailClient(email="", password="")
-    return SBAEmailClient(
-        email=ws_email,
-        password=ws_pass,
-        name=str(cfg.get("owner_email") or "").strip() or ws_email,
-        smtp_host=str(cfg.get("smtp_host") or "").strip(),
-        smtp_port=str(cfg.get("smtp_port") or "").strip(),
-        imap_host=str(cfg.get("imap_host") or "").strip(),
-        imap_port=str(cfg.get("imap_port") or "").strip(),
-    )
+    from admin.tools.agentmail_client import AgentMailEmailClient
+
+    owner_email = ""
+    if workspace_name and workspace_name != "agency":
+        try:
+            from admin.agency import sba_biztypes as biztypes
+            owner_email = str((biztypes.get_workspace_config(workspace_name) or {}).get("owner_email") or "")
+        except Exception:  # noqa: BLE001
+            owner_email = ""
+    return AgentMailEmailClient("sba", owner_email=owner_email, workspace_id=workspace_name or "agency")
 
 
 class SBAEmailClient:
-    """Send emails as owner, check replies, auto-enrich with LLM.
+    """Legacy explicit-credential SMTP utility for non-agent owner workflows.
 
-    Credentials can come from env (agency default) or per-workspace via
-    constructor args (client workspaces use THEIR OWN email + app password,
-    never the agency inbox). Pass ``email=""`` to force a disabled client.
+    Agent paths never instantiate this class. SMTP credentials are accepted
+    only through constructor arguments; no owner password is read from env.
+    Pass ``email=""`` or omit ``password`` to force a disabled client.
     """
 
     def __init__(self, email: str | None = None, password: str | None = None,
@@ -94,7 +105,7 @@ class SBAEmailClient:
         # Instance creds win; otherwise fall back to env defaults (agency).
         # Note: explicit "" (not None) means "force disabled", never fall back.
         self.email = (OWNER_EMAIL if email is None else email or "").strip()
-        self.password = OWNER_EMAIL_PASSWORD if password is None else password
+        self.password = _legacy_smtp_password(password)
         self.name = (name or OWNER_NAME or "").strip()
         self.smtp_host = (smtp_host or SMTP_HOST or "").strip()
         self.imap_host = (imap_host or IMAP_HOST or "").strip()
@@ -109,7 +120,7 @@ class SBAEmailClient:
         self._enabled = bool(self.email and self.password)
         if not self._enabled:
             logger.warning(
-                "SBA email disabled. Set SBA_OWNER_EMAIL and SBA_OWNER_EMAIL_PASSWORD (app password)."
+                "Legacy SBA email disabled. Provide email and password explicitly."
             )
 
     @property
@@ -142,6 +153,20 @@ class SBAEmailClient:
         msg["To"] = to_email
         msg["Subject"] = subject
 
+        # RFC 2369 List-Unsubscribe. Taken from Colossus
+        # (github.com/vitorfs/colossus, campaigns/api.py), which is
+        # self-hosted bulk mail and gets this right.
+        #
+        # Gmail and Yahoo require it from any bulk sender, and its absence is
+        # itself a spam signal. The one-click HTTPS form is what a mail client
+        # hits automatically when the reader clicks unsubscribe; the mailto form
+        # is the fallback for clients that will not make an HTTPS call. Sending
+        # both is what Colossus does and is the reason its mail is not filtered.
+        unsub = _unsubscribe_headers(to_email)
+        if unsub:
+            for header, value in unsub.items():
+                msg[header] = value
+
         # Plain text part
         msg.attach(MIMEText(body_text, "plain", "utf-8"))
 
@@ -149,6 +174,8 @@ class SBAEmailClient:
             loop = asyncio.get_running_loop()
 
             def _send() -> None:
+                import smtplib
+
                 with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
                     server.starttls()
                     server.login(self.email, self.password)
@@ -188,6 +215,8 @@ class SBAEmailClient:
             loop = asyncio.get_running_loop()
 
             def _fetch() -> list[dict[str, Any]]:
+                import imaplib
+
                 result: list[dict[str, Any]] = []
                 mail = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
                 mail.login(self.email, self.password)
