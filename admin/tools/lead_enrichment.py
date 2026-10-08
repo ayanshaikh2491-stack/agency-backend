@@ -583,7 +583,100 @@ def find_lead_email(
         "all_emails": sorted(emails),
         "sources": search_sources[:3],
         "patched": patched,
+        "candidates": _pattern_candidates(best, set(crawled)),
     }
+
+
+# ── Pattern detection and MX check, ported from Scout ───────────────────────
+#
+# Scout (github.com/kiryano/Scout) reads an address already published on a
+# site, learns that company's naming convention, and applies it to a name to
+# produce a candidate. That part is portable and useful. Its SMTP verification
+# is not yet: it needs outbound port 25, which is blocked here, so a candidate
+# cannot be confirmed to exist.
+#
+# The consequence drives the whole design here. A pattern candidate is a guess.
+# It is returned under "candidates" and never under "email", because an invented
+# address that gets sent to bounces, marks the sending domain as spam, and makes
+# the recipient distrust the agency. An empty email field costs one follow-up
+# phone call. A fabricated one costs the sending reputation.
+
+
+def _detect_email_pattern(local_part: str) -> str:
+    """Infer a company's local-part convention from one of its addresses.
+
+    first.last  most common; f.last  initial-surname; first  bare first name.
+    """
+    local = (local_part or "").strip().lower()
+    if not local:
+        return ""
+    if "." in local:
+        parts = local.split(".")
+        if len(parts) == 2 and all(parts):
+            return "f.last" if len(parts[0]) == 1 else "first.last"
+    if re.match(r"^[a-z][a-z]+$", local):
+        return "first"
+    return ""
+
+
+def _apply_email_pattern(pattern: str, first: str, last: str, domain: str) -> str:
+    templates = {
+        "first.last": f"{first}.{last}@{domain}",
+        "f.last": f"{first[0]}.{last}@{domain}" if first else "",
+        "first": f"{first}@{domain}",
+    }
+    return templates.get(pattern, "")
+
+
+def _has_mx(domain: str) -> bool:
+    """True when the domain has a mail exchanger.
+
+    This is the cheap half of Scout's check and it is the half that works
+    without port 25: it proves the domain accepts mail at all, which separates
+    a real business domain from a scraped directory's host.
+    """
+    if not domain:
+        return False
+    try:
+        import dns.resolver  # imported lazily; not needed unless we look up MX
+
+        records = dns.resolver.resolve(domain, "MX")
+        return bool(records)
+    except Exception:
+        return False
+
+
+def _pattern_candidates(email: str, domains: set[str]) -> list[dict[str, str]]:
+    """Candidate addresses for the business's own domain, derived from a
+    published address. Returned as unverified guesses, never as `email`."""
+    out: list[dict[str, str]] = []
+    if not email or "@" not in email:
+        return out
+    local, _, domain = email.partition("@")
+    domain = domain.lower()
+    if not domain:
+        return out
+    # A role address teaches nothing about the company's person-name
+    # convention, so it must not be used to invent one. Without this guard
+    # "info" was treated as a first name and produced the candidate "info@".
+    if local.lower().strip() in _GENERIC_PREFIXES or not _detect_email_pattern(local):
+        return out
+    pattern = _detect_email_pattern(local)
+    if not pattern:
+        return out
+    base = local.replace(".", "")
+    for candidate_domain in {domain} | {d.lower() for d in domains if d}:
+        cand = _apply_email_pattern(pattern, base, "", candidate_domain)
+        if not cand or cand.lower() == email.lower():
+            continue
+        out.append({
+            "email": cand,
+            "pattern": pattern,
+            "verified": "false",
+            "reason": "pattern guess from a published address; not confirmed to exist",
+        })
+        break
+    return out
 
 
 def _score_email(email: str, own_domain: str) -> int:
