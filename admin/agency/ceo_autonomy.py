@@ -164,6 +164,66 @@ def _settle_review_batch(limit: int) -> int:
     return _drain_stale_reviews(limit)
 
 
+def _pipeline_brief(limit: int = 8) -> dict[str, Any] | None:
+    """Describe the leads that still need sales work, for the SBA to act on.
+
+    Returns None when there is nothing left to work, so the caller does not
+    dispatch an agent to be told there is no job.
+
+    Picks leads that are not yet contacted and prefers the contactable ones.
+    An address we found is the difference between a lead the SBA can act on
+    alone and one it can only report, so it sorts ahead.
+    """
+    try:
+        from admin.agency.sba_store import list_leads
+
+        leads = list_leads()
+    except Exception:
+        logger.debug("could not read the lead pipeline", exc_info=True)
+        return None
+
+    open_states = {"new", "contacted", "meeting", "proposal", "negotiation"}
+    todo = [
+        l for l in leads
+        if str(l.get("status") or "new").lower() in open_states
+        and str(l.get("status") or "").lower() not in {"closed", "lost", "won"}
+    ]
+    if not todo:
+        return None
+
+    todo.sort(
+        key=lambda l: (
+            bool(l.get("email") or l.get("phone")),
+            bool(l.get("website")),
+            int(l.get("score") or 0),
+        ),
+        reverse=True,
+    )
+    chosen = todo[:limit]
+
+    lines = []
+    for l in chosen:
+        contact = l.get("email") or l.get("phone") or "NONE ON FILE"
+        lines.append(
+            f"- {l.get('business_name') or l.get('name')} | {l.get('city') or 'unknown city'}"
+            f" | status {l.get('status')} | score {l.get('score')}"
+            f" | contact: {contact}"
+        )
+
+    task = (
+        "Work these real businesses in the TAGS Agency pipeline. Use your tools: "
+        "qualify them, and for each one produce the outreach you would actually "
+        "send. Do not ask what to do next; decide and act, then report what you "
+        "did.\n\n"
+        + "\n".join(lines)
+        + "\n\nRules: never invent a phone number or email. If contact reads NONE "
+        "ON FILE, find it with find_lead_email or say you could not. For each "
+        "lead give: fit score with a one line reason, and the outreach message "
+        "you would send."
+    )
+    return {"total": len(todo), "chosen": len(chosen), "task": task}
+
+
 def _agent_for_task(task: str) -> str:
     """Pick the doer whose remit matches the task, when the CEO names none.
 
@@ -1486,6 +1546,39 @@ class CEOAutonomy:
                         }
             except Exception as exc:
                 logger.debug("CEO autonomy prospect bootstrap check failed: %s", _safe_error(exc))
+
+            # Work the pipeline. Prospecting above only fires when the pipeline
+            # is empty, so once leads exist the heartbeat fell through to
+            # observe and reported no urgent work, while 128 leads sat at status
+            # new and none had ever been contacted. Finding leads is not the
+            # job, selling to them is. This is the branch that does the actual
+            # work of the agency, on a cadence so it does not run every tick.
+            try:
+                state = await _load_state()
+                interval = float(os.getenv("AGENCY_WORK_PIPELINE_INTERVAL_SEC", "180"))
+                last = float(state.get("last_work_pipeline", 0.0) or 0.0)
+                now = time.time()
+                if int(summary.get("total_leads", 0) or 0) > 0 and now - last >= interval:
+                    brief = _pipeline_brief()
+                    if brief:
+                        await _save_state({"last_work_pipeline": now})
+                        return {
+                            "action": "work_pipeline",
+                            "rationale": (
+                                f"{brief['total']} lead(s) on file and not yet worked; "
+                                "CEO delegates sales work on the top ones."
+                            ),
+                            "workspace_id": self._fallback_workspace(overview),
+                            "delegate": {
+                                "agent_type": "sba",
+                                "action_type": "internal_analysis",
+                                "task": brief["task"],
+                            },
+                            "result": {"overview": summary, "leads_in_brief": brief["total"]},
+                        }
+            except Exception as exc:
+                logger.debug("CEO autonomy pipeline work check failed: %s", _safe_error(exc))
+
             return {
                 "action": "observe",
                 "rationale": "Heartbeat inspected the agency overview; no urgent internal work.",
