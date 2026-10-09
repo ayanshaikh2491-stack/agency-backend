@@ -188,15 +188,43 @@ def check_gateway_keys() -> dict:
     return out
 
 
+def _probe_workspace_id() -> str:
+    """Find the workspace the agency actually runs in.
+
+    The probe used to hardcode "agency", but the real id is "ws_agency", so
+    every probe came back Workspace not found and the check reported the same
+    failure for all agents while telling you nothing about any of them.
+    Resolved from the store instead, preferring the busiest workspace so a
+    future rename does not silently break the diagnostic again.
+    """
+    try:
+        from admin.workspace.manager import list_workspaces
+
+        best, best_n = "", -1
+        for w in list_workspaces():
+            wid = str(w.get("id") or w.get("workspace_id") or "")
+            if not wid:
+                continue
+            n = len(getattr(w, "agents", None) or w.get("agents") or {}) or 0
+            if n > best_n:
+                best, best_n = wid, n
+        if best:
+            return best
+    except Exception:
+        logger.debug("could not list workspaces for the probe", exc_info=True)
+    return "ws_agency"
+
+
 def check_agents() -> list[dict]:
     """Ping each registered workspace agent with a 1-word health probe."""
     from admin.workspace.manager import route_to_agent
 
     probes: list[dict] = []
+    workspace_id = _probe_workspace_id()
     try:
         from admin.runtime import get_workspace
 
-        ws = get_workspace("agency")
+        ws = get_workspace(workspace_id)
         agent_types = list(getattr(ws, "agents", {}).keys()) if ws else []
     except Exception:  # noqa: BLE001
         agent_types = []
@@ -219,7 +247,7 @@ def check_agents() -> list[dict]:
     async def _probe(at: str) -> dict:
         try:
             resp = await asyncio.wait_for(
-                route_to_agent(workspace_id="agency", agent_type=at, message="Health probe: reply with the single word OK"),
+                route_to_agent(workspace_id=workspace_id, agent_type=at, message="Health probe: reply with the single word OK"),
                 timeout=90,
             )
             bad = any(
