@@ -8,9 +8,9 @@ key set     = True
 --- tags_agency_workspace.db
     expected path : /app/tags_agency_workspace.db
     exists        : True
-    size          : 610304
+    size          : 675840
     is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x1b\x00\x00\x00\x95'
+    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x1d\x00\x00\x00\xa5'
     is sqlite     : True
     tables        : 17
     integrity     : ok
@@ -28,9 +28,9 @@ key set     = True
 --- freeapi.db
     expected path : /app/server/data/freeapi.db
     exists        : True
-    size          : 839680
+    size          : 843776
     is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x0f\x00\x00\x00\xcd'
+    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x10\x00\x00\x00\xce'
     is sqlite     : True
     tables        : 31
     integrity     : ok
@@ -38,10 +38,10 @@ key set     = True
 ======================================================================
 every .db file visible under the app root
 ======================================================================
-      839680  sqlite=True   /app/node_modules/@freellmapi/server/data/freeapi.db
-      839680  sqlite=True   /app/server/data/freeapi.db
+      843776  sqlite=True   /app/node_modules/@freellmapi/server/data/freeapi.db
+      843776  sqlite=True   /app/server/data/freeapi.db
        69632  sqlite=True   /app/tags_agency.db
-      610304  sqlite=True   /app/tags_agency_workspace.db
+      675840  sqlite=True   /app/tags_agency_workspace.db
 
 ======================================================================
 sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
