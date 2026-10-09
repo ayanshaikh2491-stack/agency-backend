@@ -694,28 +694,23 @@ async def _call_with_retry(agent, message: str, max_retries: int = 2) -> str:
                 # of hammering a throttled upstream.
                 llm_record_rate_limit(e)
                 wait = llm_429_backoff_hint(e)
-                if attempt >= max_retries:
-                    logger.warning(
-                        "Agent %s rate limited by upstream (attempt %d/%d, last "
-                        "attempt): %s", agent_name, attempt + 1, max_retries + 1, e)
-                    continue
-                if llm_circuit_open():
-                    # The breaker is holding traffic back on purpose. Another
-                    # attempt inside this call would defeat it.
-                    logger.warning(
-                        "Agent %s rate limited by upstream (attempt %d/%d): %s - "
-                        "LLM circuit is open, not retrying", agent_name,
-                        attempt + 1, max_retries + 1, e)
-                    raise LLMGuardError(
-                        f"{agent_name} rate limited ({e}); LLM circuit is open, "
-                        f"not retrying - retry after the breaker closes"
-                    ) from e
+                # A 429 is never retried inside the same call, regardless of
+                # the breaker. This used to depend on llm_circuit_open(), which
+                # was a mistake twice over: the breaker exists to hold back
+                # other agents, so its threshold has nothing to do with whether
+                # this call should hit a throttled upstream again, and raising
+                # the threshold silently turned one 429 into three back to back
+                # re-hits. Retrying a throttled call is what extends the
+                # throttle. Register it, surface it, and let the next turn go
+                # through the paced window.
                 logger.warning(
                     "Agent %s rate limited by upstream (attempt %d/%d): %s - "
-                    "waiting %.0fs before the next attempt",
-                    agent_name, attempt + 1, max_retries + 1, e, wait)
-                await asyncio.sleep(wait)
-                continue
+                    "not retrying in this call", agent_name,
+                    attempt + 1, max_retries + 1, e)
+                raise LLMGuardError(
+                    f"{agent_name} hit upstream 429 ({e}); not retried in the same "
+                    f"call - retry after {wait:.0f}s"
+                ) from e
             logger.warning("Agent error (attempt %d/%d): %s", attempt + 1, max_retries + 1, e)
 
         if attempt < max_retries:

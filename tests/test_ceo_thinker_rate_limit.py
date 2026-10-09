@@ -90,7 +90,41 @@ def test_thinker_spends_one_call_on_a_429_not_two(monkeypatch):
     )
     assert result["action"] == "observe"
     assert "429" in result["rationale"], result
-    assert throttle.circuit_open() is True, "the 429 must have opened the breaker"
+
+
+def _trip_breaker(monkeypatch):
+    """Open the breaker the way sustained throttling would.
+
+    Calls in a tight loop are deduplicated into one incident on purpose, so a
+    loop here never accumulates strikes. Clearing the dedup marker between
+    calls models separate incidents, which is what the breaker counts.
+    """
+    for _ in range(throttle.CIRCUIT_THRESHOLD):
+        monkeypatch.setattr(throttle, "_last_rate_limit_at", 0.0)
+        throttle.record_rate_limit(RuntimeError("HTTP 429 from gateway"))
+
+
+def test_one_429_does_not_take_the_agency_offline(monkeypatch):
+    """All nine agents share one key, so a single 429 is ordinary noise.
+
+    At a threshold of one, two transient throttles produced a 253 second
+    outage with every agent reporting a blocked circuit, for two throttled
+    calls. That is a far worse outcome than absorbing the 429 and moving on.
+    """
+    _reset(monkeypatch)
+    throttle.record_rate_limit(RuntimeError("HTTP 429 from gateway"))
+    assert throttle.circuit_open() is False, (
+        "one throttled call must not open the breaker for everyone"
+    )
+
+
+def test_the_breaker_still_opens_when_throttling_persists(monkeypatch):
+    """The change is a threshold, not the removal of the breaker."""
+    _reset(monkeypatch)
+    _trip_breaker(monkeypatch)
+    assert throttle.circuit_open() is True, (
+        "sustained throttling must still stop us hammering a throttled provider"
+    )
 
 
 def test_thinker_skips_entirely_while_the_circuit_is_open(monkeypatch):
@@ -98,10 +132,14 @@ def test_thinker_skips_entirely_while_the_circuit_is_open(monkeypatch):
     _configure_thinker(monkeypatch)
     seen = _patch_httpx(monkeypatch, [200])
 
-    throttle.record_rate_limit(RuntimeError("HTTP 429 from gateway"))
+    for _ in range(throttle.CIRCUIT_THRESHOLD):
+        throttle.record_rate_limit(RuntimeError("HTTP 429 from gateway"))
+    _trip_breaker(monkeypatch)
+    _trip_breaker(monkeypatch)
 
     result = asyncio.run(_autonomy()._think({"summary": {"total_leads": 0}}))
 
+    assert throttle.circuit_open() is True, "this test is meaningless if the breaker is shut"
     assert seen == [], "an open circuit must cost zero upstream calls"
     assert result["action"] == "observe"
     assert "rate limiting" in result["rationale"].lower(), result
@@ -151,7 +189,7 @@ def test_status_surfaces_the_breaker_state(monkeypatch):
         return _Db()
 
     monkeypatch.setattr(ca, "get_workspace_db", _fake_db)
-    throttle.record_rate_limit(RuntimeError("HTTP 429 from gateway"))
+    _trip_breaker(monkeypatch)
 
     state = asyncio.run(_autonomy().status())
 

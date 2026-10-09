@@ -1745,12 +1745,23 @@ async def _open_d1(cfg: dict[str, str] | None = None) -> _D1Backend:
     )
 
     # Boot probe with retries: network blips between Render and Cloudflare are
-    # common. Retry up to 3 times with exponential backoff (1s, 2s, 4s).
-    probe_retries = 3
+    # common. Retry with exponential backoff (1s, 2s, 4s).
+    #
+    # The probe uses its own client with max_retries=0. The backend already
+    # retries every statement internally, so a probe that also looped would
+    # multiply the two retry layers: 3 probe attempts x 3 inner attempts is 9
+    # requests to Cloudflare for a service that is simply down. That is slow to
+    # fail, noisy in the logs, and it burns the boot budget the health check
+    # needs. One layer of retries per call is enough.
+    probe_client = _make_d1_client(timeout)
+    probe_backend = _D1Backend(
+        endpoint, cfg["token"], client=probe_client, timeout=timeout, max_retries=0,
+    )
+    probe_retries = retries + 1
     probe_base_delay = 1.0
     for attempt in range(probe_retries):
         try:
-            await backend.execute("SELECT 1", ())
+            await probe_backend.execute("SELECT 1", ())
             break
         except _D1Error as exc:
             if attempt == probe_retries - 1:

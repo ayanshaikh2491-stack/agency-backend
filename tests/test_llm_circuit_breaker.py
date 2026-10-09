@@ -55,6 +55,13 @@ class _StatusError(Exception):
 
 def _reset(monkeypatch) -> _Clock:
     """Return the breaker to a pristine state and take control of the clock."""
+    # This file tests the breaker's mechanics: that it opens, refuses locally,
+    # backs off, and recovers. Those are one strike by design so each test
+    # reads clearly. What the production threshold actually is, and that a
+    # single 429 is deliberately not enough to stop the agency, is the policy
+    # and lives in test_llm_token_pacing.py. Mixing the two made every
+    # mechanic test fail when the threshold moved from 1 to 3.
+    monkeypatch.setattr(throttle, "CIRCUIT_THRESHOLD", 1)
     for name, value in (
         ("_circuit_open_until", 0.0),
         ("_circuit_strikes", 0),
@@ -130,18 +137,21 @@ def test_backoff_doubles_per_open_and_stops_at_the_cap(monkeypatch):
     clock = _reset(monkeypatch)
     seen: list[float] = []
 
-    # Enough opens to walk past the cap: 5, 10, 20, 40, 80, 160, 300, 300...
-    for _ in range(8):
+    # Walk the backoff far enough to pass the ceiling. How many opens that takes
+    # depends on the base and the cap, which are tuned values and have both moved:
+    # this used to hardcode a chain of 5, 10, 20, 40, 80, 160 and only passed
+    # because the cap was 300. Assert the rule instead of one particular chain.
+    for _ in range(12):
         wait = throttle.record_rate_limit(_StatusError(429))
         seen.append(wait)
         clock.advance(wait + 1)
 
     assert seen[0] == throttle.CIRCUIT_BASE_SEC
-    # Each early step is a doubling.
-    assert seen[1] == seen[0] * 2
-    assert seen[2] == seen[1] * 2
-    assert seen[3] == seen[2] * 2
-    # Capped: nothing may exceed the configured ceiling.
+    # Every step before the cap is a doubling.
+    for prev, cur in zip(seen, seen[1:]):
+        if cur < throttle.CIRCUIT_MAX_SEC:
+            assert cur == prev * 2, f"{prev} -> {cur} should double below the cap"
+    # Capped: nothing may exceed the configured ceiling, and the walk ends on it.
     assert max(seen) == throttle.CIRCUIT_MAX_SEC
     assert seen[-1] == throttle.CIRCUIT_MAX_SEC
     assert all(w <= throttle.CIRCUIT_MAX_SEC for w in seen)
