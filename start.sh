@@ -96,12 +96,36 @@ if [ -n "$FREEAPI_ADMIN_EMAIL" ] && [ -n "$FREEAPI_ADMIN_PASSWORD" ]; then
     -d "{\"email\":\"$FREEAPI_ADMIN_EMAIL\",\"password\":\"$FREEAPI_ADMIN_PASSWORD\"}" \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)"
   if [ -z "$seed_token" ]; then
-    seed_token="$(curl -fsS -X POST "http://127.0.0.1:$FREEAPI_PORT/api/auth/login" \
+    # Login failed. The gateway stores the admin account in its own database, so
+    # changing the password in the environment does not change it: /auth/setup
+    # only ever works once and /auth/login keeps checking the old password. The
+    # result is silent and severe, because with no token every provider key is
+    # skipped and every agent then fails with a 503 about no usable key.
+    #
+    # This is a single-tenant service with exactly one admin account, so when
+    # the configured credentials cannot get in, the account is stale by
+    # definition and is reset to match the environment. Users are only that one
+    # operator; nothing else in the database is touched.
+    echo "[start] dashboard login failed; resetting the stale admin account"
+    FREEAPI_DB_PATH="$FREEAPI_DB_PATH" node -e '
+      const Database = require("better-sqlite3");
+      const db = new Database(process.env.FREEAPI_DB_PATH || "/app/server/data/freeapi.db");
+      try {
+        db.prepare("DELETE FROM users").run();
+        db.prepare("DELETE FROM sessions").run();
+        console.log("[seed] stale admin account cleared");
+      } catch (e) { console.log("[seed] could not clear admin account:", e.message); }
+      db.close();
+    ' || echo "[start] WARN: admin account reset failed"
+    seed_token="$(curl -fsS -X POST "http://127.0.0.1:$FREEAPI_PORT/api/auth/setup" \
       -H 'Content-Type: application/json' \
       -d "{\"email\":\"$FREEAPI_ADMIN_EMAIL\",\"password\":\"$FREEAPI_ADMIN_PASSWORD\"}" \
       | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)"
   fi
   if [ -n "$seed_token" ]; then echo "[start] dashboard auth token acquired"; fi
+  if [ -z "$seed_token" ]; then
+    echo "[start] WARN: no dashboard token; provider keys will NOT be seeded and every agent will fail"
+  fi
 fi
 
 # Pin the unified key BEFORE any /v1 use, so redeploy re-seeds the same key the
