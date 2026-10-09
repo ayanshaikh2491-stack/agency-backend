@@ -250,11 +250,25 @@ def check_agents() -> list[dict]:
                 route_to_agent(workspace_id=workspace_id, agent_type=at, message="Health probe: reply with the single word OK"),
                 timeout=90,
             )
+            text = (resp or "").strip()
+            # The probe reported OK for agents whose reply was "SEO agent LLM
+            # call blocked: LLM gateway circuit is open". A check that says OK
+            # while the agent failed is worse than no check, because it is
+            # believed. Match the failure markers this codebase actually emits,
+            # not just the old generic ones.
+            lowered = text.lower()
             bad = any(
-                kw in (resp or "").lower()
-                for kw in ("modulenotfound", "error code", "traceback", "failed:", "not found")
+                kw in lowered
+                for kw in (
+                    "modulenotfound", "error code", "traceback", "failed:",
+                    "not found", "circuit is open", "circuitopenerror",
+                    "llm call blocked", "no candidate model",
+                    "rate limit", "call blocked", "budgetexceeded",
+                    "call exceeded", "refused",
+                )
             )
-            return {"agent": at, "ok": not bad, "detail": (resp or "")[:120]}
+            ok = bool(text) and not bad
+            return {"agent": at, "ok": ok, "detail": text[:120]}
         except Exception as exc:  # noqa: BLE001
             return {"agent": at, "ok": False, "detail": f"{type(exc).__name__}: {exc}"}
 
