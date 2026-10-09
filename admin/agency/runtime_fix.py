@@ -204,7 +204,17 @@ def check_agents() -> list[dict]:
         agent_types = ["sba", "seo", "content", "website"]
     import asyncio
 
-    loop = asyncio.get_event_loop()
+    # get_event_loop() raises in a worker thread on Python 3.10 and later
+    # because no loop is set there, and this is called from a threadpool
+    # precisely so the blocking probes do not stall the event loop. So get a
+    # loop without depending on one already being current, and close it after.
+    try:
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("loop is closed")
+    except (RuntimeError, DeprecationWarning):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     async def _probe(at: str) -> dict:
         try:
@@ -229,7 +239,13 @@ def check_agents() -> list[dict]:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             return ex.submit(lambda: asyncio.run(_all())).result()
-    return loop.run_until_complete(_all())
+    try:
+        return loop.run_until_complete(_all())
+    finally:
+        # Only the loop we created here gets closed. A loop that belonged to
+        # the caller is still theirs to use.
+        if not loop.is_closed():
+            loop.close()
 
 
 def system_selfcheck(deep: bool = False) -> dict:
