@@ -63,6 +63,12 @@ def _setting(name: str, default: str) -> str:
 
 RPM = max(1, int(os.getenv("AGENCY_LLM_RPM", "38")))
 _WINDOW = 60.0
+# Groq's own header for openai/gpt-oss-120b says 1000 requests per minute and
+# 8000 tokens per minute. Tokens are the binding constraint, so that is what is
+# paced on. Kept under the published limit on purpose: the remaining counter
+# resets on the provider's clock, not ours, so arriving exactly at the edge is
+# how you get a 429. 6500 leaves headroom for a call whose estimate was low.
+MINUTE_TOKEN_CAP = max(1000, int(os.getenv("AGENCY_LLM_TOKENS_PER_MIN", "6500")))
 DAILY_TOKEN_CAP = int(os.getenv("AGENCY_LLM_DAILY_TOKENS", "0"))  # 0 = off
 DAILY_USD_CAP = float(os.getenv("AGENCY_LLM_DAILY_USD", "0"))     # 0 = off
 USD_PER_1M_IN = float(os.getenv("AGENCY_LLM_USD_IN", "0"))
@@ -355,6 +361,7 @@ def retry_after_hint(exc: BaseException) -> float:
 
 _lock = asyncio.Lock()
 _hits: deque[float] = deque()
+_token_events: deque[tuple[float, int]] = deque()
 _usage_lock = asyncio.Lock()
 _day = ""
 _tokens_in = 0
@@ -375,14 +382,27 @@ async def _roll_day_locked() -> None:
         _usd = 0.0
 
 
-async def acquire() -> None:
-    """Await until an RPM slot frees AND the daily budget still has room."""
+async def acquire(estimated_tokens: int = 0) -> None:
+    """Await until there is room in the per-minute budget AND the daily budget.
+
+    Requests per minute was the wrong unit to pace on. Groq's header on the
+    model we actually use says 1000 requests per minute but only 8000 tokens
+    per minute, so a handful of agents each sending a few thousand tokens
+    exhausts the real limit while the request counter still reads empty. That
+    is what produced the HTTP 429s: not too many calls, too many tokens in
+    too few seconds. A caller that can estimate its own prompt size passes it
+    in so the wait happens here, before the call, rather than as a 429 that
+    trips the breaker for everyone.
+    """
+    est = max(0, int(estimated_tokens or 0))
     while True:
         async with _lock:
             await _roll_day_locked()
             now = time.monotonic()
             while _hits and now - _hits[0] >= _WINDOW:
                 _hits.popleft()
+            while _token_events and now - _token_events[0][0] >= _WINDOW:
+                _token_events.popleft()
             if DAILY_TOKEN_CAP and (_tokens_in + _tokens_out) >= DAILY_TOKEN_CAP:
                 raise BudgetExceededError(
                     f"daily LLM token cap reached "
@@ -390,10 +410,17 @@ async def acquire() -> None:
             if DAILY_USD_CAP and _usd >= DAILY_USD_CAP:
                 raise BudgetExceededError(
                     f"daily LLM USD cap reached (${_usd:.4f}/{DAILY_USD_CAP})")
-            if len(_hits) < RPM:
+            spent = sum(n for _, n in _token_events)
+            if len(_hits) < RPM and (not est or spent + est <= MINUTE_TOKEN_CAP):
                 _hits.append(now)
+                if est:
+                    _token_events.append((now, est))
                 return
-            wait = _WINDOW - (now - _hits[0])
+            # The token cap can block a call while the request cap still has room, in which
+            # case _hits is empty. Reading _hits[0] there raised IndexError and
+            # took the caller down with it. Wait for the oldest request when
+            # there is one, otherwise for a short fixed beat so the window rolls.
+            wait = _WINDOW - (now - _hits[0]) if _hits else 1.0
         logger.debug("LLM rate limit reached, waiting %.1fs", wait)
         await asyncio.sleep(min(max(wait, 0.05), 5.0))
 
@@ -454,6 +481,8 @@ def snapshot() -> dict:
     return {
         "day": _day or _today(),
         "rpm": RPM,
+        "tokens_per_min": MINUTE_TOKEN_CAP,
+        "tokens_spent_this_min": sum(n for _, n in _token_events),
         "daily_token_cap": DAILY_TOKEN_CAP,
         "daily_usd_cap": DAILY_USD_CAP,
         "tokens_in": _tokens_in,
@@ -463,6 +492,40 @@ def snapshot() -> dict:
         "circuit": breaker,
         "concurrency": concurrency,
     }
+
+
+def _estimate_request_tokens(kwargs: dict) -> int:
+    """Rough size of an outgoing call, so the window can pace it.
+
+    Pacing on requests alone let three agents of a few thousand tokens each
+    through inside the same second, which is what produced the provider 429:
+    the request budget was empty while the token budget was already gone.
+    A cheap character-count estimate is enough to keep calls spaced out. It
+    deliberately over-counts slightly, because waiting a moment too long is
+    harmless and a 429 is not. Returns 0 when nothing can be read, which falls
+    back to request pacing alone.
+    """
+    try:
+        messages = kwargs.get("messages") or []
+        chars = 0
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                chars += len(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        chars += len(str(part.get("text") or ""))
+        max_out = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
+        out_tokens = int(max_out) if isinstance(max_out, (int, float)) else 0
+        # ~3.5 characters per token is the usual English rule of thumb, and
+        # the fallback covers callers that set no ceiling on the reply.
+        est = int(chars / 3.5) + out_tokens
+        return min(est, MINUTE_TOKEN_CAP) if est > 0 else 0
+    except Exception:
+        return 0
 
 
 def install() -> bool:
@@ -486,7 +549,7 @@ def install() -> bool:
         # Breaker first: while it is open there is no point taking an RPM slot
         # for a request that will be refused locally anyway.
         ensure_circuit_closed()
-        await acquire()
+        await acquire(estimated_tokens=_estimate_request_tokens(kwargs))
         try:
             resp = await asyncio.wait_for(
                 orig_create(self, *args, **kwargs),
