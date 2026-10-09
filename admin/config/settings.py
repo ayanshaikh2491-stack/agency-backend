@@ -40,6 +40,13 @@ AGENCY_CEO_API_BASE = os.getenv("AGENCY_CEO_API_BASE", "")
 
 # ── Workspace (per‑client) agent model ─────────────────────────────────────
 WORKSPACE_AGENT_MODEL = os.getenv("WORKSPACE_AGENT_MODEL", "llama-3.3-70b-versatile")
+# Second model for work that does not need the strongest reasoning: summarising,
+# memory writes, analytics rollups, SEO checks. Free tiers cap tokens PER MINUTE
+# per provider, so every draft written by the strong model burns quota that a
+# cheap model would have handled. Splitting the two keeps the writing agents
+# inside the quota instead of starving everything else.
+# Empty means "use WORKSPACE_AGENT_MODEL for everything", the old behaviour.
+WORKSPACE_AGENT_MODEL_ROUTINE = os.getenv("WORKSPACE_AGENT_MODEL_ROUTINE", "")
 WORKSPACE_API_KEY = os.getenv("WORKSPACE_API_KEY", "")
 WORKSPACE_API_BASE = os.getenv("WORKSPACE_API_BASE", "")
 

@@ -121,7 +121,7 @@ async def analyzing_call_llm(state: AnalyzingAgentState) -> dict[str, Any]:
     messages.extend(state.get("messages", []))
 
     client = _get_llm_client()
-    model = settings.WORKSPACE_AGENT_MODEL or "llama-3.3-70b-versatile"
+    model = settings.WORKSPACE_AGENT_MODEL_ROUTINE or settings.WORKSPACE_AGENT_MODEL or "llama-3.3-70b-versatile"
 
     try:
         response = client.chat.completions.create(

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 5
 # hy3-free default model (OpenCode Zen). Falls back to configured WORKSPACE_AGENT_MODEL.
-DEFAULT_ANALYTICS_MODEL = settings.WORKSPACE_AGENT_MODEL or "big-pickle"
+DEFAULT_ANALYTICS_MODEL = settings.WORKSPACE_AGENT_MODEL_ROUTINE or settings.WORKSPACE_AGENT_MODEL or "big-pickle"
 LLM_TIMEOUT_SECONDS = 60.0
 LLM_MAX_RETRIES = 2
 
