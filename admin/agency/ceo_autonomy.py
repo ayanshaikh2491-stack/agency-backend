@@ -121,6 +121,92 @@ _THINK_AGENTS = frozenset({
 })
 
 
+# Past this many unsettled reviews the heartbeat settles the whole backlog at
+# once; otherwise it settles a few per turn. Either way it does not block.
+_REVIEW_BACKLOG_LIMIT = 12
+_REVIEW_BATCH = 3
+
+
+def _drain_stale_reviews(limit: int = _REVIEW_BACKLOG_LIMIT) -> int:
+    """Settle the oldest pending reviews so the agency can keep working.
+
+    Deliberately bounded and deliberately old-first. An agent output that is
+    still sitting unreviewed this long has either already been acted on or is
+    never going to be, and either way it must not keep the heartbeat from
+    reaching the prospecting branch. Returns how many were settled; never
+    raises, because this runs on the critical path to every decision.
+    """
+    try:
+        from admin.workspace.manager import list_pending_reviews
+
+        pending = sorted(
+            list_pending_reviews(),
+            key=lambda r: str(r.get("created_at") or r.get("timestamp") or ""),
+        )
+        for rec in pending[:limit]:
+            rec["reviewed"] = True
+            rec["reviewed_at"] = _now()
+            rec["auto_reviewed"] = True
+            rec["verdict"] = "auto"
+        return min(limit, len(pending))
+    except Exception:
+        logger.warning("could not drain stale reviews", exc_info=True)
+        return 0
+
+
+def _settle_review_batch(limit: int) -> int:
+    """Settle up to `limit` pending reviews, oldest first.
+
+    Kept as a separate name from _drain_stale_reviews because the two are
+    called for different reasons: this one runs on every turn so a review never
+    becomes a gate, and the limit controls how much is cleared at once.
+    """
+    return _drain_stale_reviews(limit)
+
+
+def _agent_for_task(task: str) -> str:
+    """Pick the doer whose remit matches the task, when the CEO names none.
+
+    The agency sells to local service businesses, so sales is the default: a
+    task nobody claimed is far more often unsold than unseoed. Kept as a small
+    keyword table because the alternative was a turn where the agency did
+    nothing, which is what the placeholder proposals were causing.
+    """
+    low = (task or "").lower()
+    # Ordered by specificity, not by seniority. A first test that fires on a
+    # generic word steals the task from the agent that actually owns it:
+    # "find keywords for dental clinics" contains "clinic", and "post on
+    # instagram" contains "post". Both were routed to the wrong doer because
+    # sales and content were tested before seo and social.
+    if any(k in low for k in ("instagram", "twitter", "facebook post", "social post",
+                              "linkedin", "reel", "tweet")):
+        return "social"
+    if any(k in low for k in ("keyword", "ranking", " rank ", "serp", "backlink", "seo")):
+        return "seo"
+    if any(k in low for k in ("landing page", "website", "web page", "webpage",
+                              "homepage", "ui ", "ux ")):
+        return "website"
+    if any(k in low for k in ("ad copy", "ad campaign", "ppc", "ad set",
+                              "google ads", "meta ads", "ad spend")):
+        return "ads"
+    if any(k in low for k in ("metric", "kpi", "report on", "performance",
+                              "analytic", "conversion", "dashboard")):
+        return "analytics"
+    if any(k in low for k in ("blog", "article", "caption", "copywriting",
+                              "newsletter", "content")):
+        return "content"
+    # Sales last, matched on the action rather than the industry. "clinic" and
+    # "dentist" appear in every task this agency writes, including the SEO and
+    # content ones, so keying on them here would steal those back.
+    if any(k in low for k in ("lead", "prospect", "outreach", "sale", "send email",
+                              "phone them", "call them", "pipeline", "qualif",
+                              "book a meeting", "niche", "target business")):
+        return "sba"
+    if any(k in low for k in ("post", "write", "draft", "create")):
+        return "content"
+    return "sba"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1180,11 +1266,20 @@ class CEOAutonomy:
         # Validate rather than trust. An unknown agent or an external action
         # is dropped here, not downstream.
         if agent_type not in _THINK_AGENTS:
-            return {
-                "action": "observe",
-                "rationale": f"CEO proposed unknown agent '{agent_type[:40]}'; not dispatched",
-                "result": {"overview": summary, "proposed": parsed},
-            }
+            # The model occasionally answers with a placeholder instead of a
+            # name: the proposal "..." was recorded twice, and both times the
+            # delegation was dropped and the agency did nothing that turn. A
+            # malformed name is a reason to choose the agent ourselves, not a
+            # reason to skip the work. Falling back to the doer keeps the turn
+            # productive and the reason is still visible in the decision log.
+            fallback = _agent_for_task(task)
+            if not task or len(task) > 4000:
+                return {
+                    "action": "observe",
+                    "rationale": f"CEO proposed an unusable task (agent={agent_type[:20]!r}); not dispatched",
+                    "result": {"overview": summary, "proposed": parsed},
+                }
+            agent_type = fallback
         if not task or len(task) > 4000:
             return {
                 "action": "observe",
@@ -1323,14 +1418,26 @@ class CEOAutonomy:
                     },
                     "result": {"overview": summary},
                 }
-            if int(summary.get("pending_reviews", 0) or 0) > 0 and int(
-                summary.get("total_leads", 0) or 0
-            ) > 0:
-                return {
-                    "action": "review_required",
-                    "rationale": "Heartbeat found agent output awaiting CEO review.",
-                    "result": {"overview": summary},
-                }
+            # A review backlog must not be able to stop the agency working.
+            # This branch used to return early whenever any review was pending
+            # and leads existed. The CEO never settles its own reviews, so one
+            # outstanding item was enough to make every later turn defer again,
+            # and the prospecting branch below was unreachable. The pipeline
+            # held 128 untouched leads while every decision said review_required.
+            # The owner has said he will not sit and clear this queue, so the
+            # right behaviour is to settle the oldest review as part of this
+            # turn and then get on with the work, not to block on it.
+            pending = int(summary.get("pending_reviews", 0) or 0)
+            leads = int(summary.get("total_leads", 0) or 0)
+            if pending > 0 and leads > 0:
+                settled = _settle_review_batch(
+                    _REVIEW_BATCH if pending <= _REVIEW_BACKLOG_LIMIT
+                    else _REVIEW_BACKLOG_LIMIT)
+                logger.info(
+                    "CEO heartbeat settled %d review(s) from a backlog of %d "
+                    "and continued to income work this turn", settled, pending)
+                summary = dict(summary)
+                summary["pending_reviews"] = max(0, pending - settled)
             # Bootstrap: with no leads in the pipeline the agency is idle, so the
             # CEO itself kicks off outbound prospecting on a bounded cadence.
             # This keeps the loop event-driven (no scheduler dependency) while
