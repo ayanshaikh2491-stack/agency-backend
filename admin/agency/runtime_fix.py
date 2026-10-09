@@ -19,6 +19,7 @@ scoped to the single missing distribution named in the error.
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import re
 import subprocess
@@ -117,6 +118,76 @@ def check_llm() -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def check_gateway_keys() -> dict:
+    """Report what the freeapi gateway actually holds, against what we meant to seed.
+
+    The gateway is a separate process on its own port with its own database, and
+    it is the only component whose state is invisible from outside the
+    container. Every agent failing with 503 "no candidate model has a
+    configured, usable provider key" points here, and start.sh seeding uses
+    curl -f, which discards the HTTP status of a failed seed. So there was no
+    way to tell an unseeded key from a seeded-but-unusable one. This reports
+    both sides of that comparison and never raises: it is a diagnostic.
+    """
+    out: dict = {"ok": False}
+    try:
+        import os
+
+        import httpx
+
+        raw = os.getenv("PROVIDER_KEYS_JSON", "")
+        try:
+            intended = [str(i.get("platform")) for i in json.loads(raw)] if raw else []
+        except Exception:
+            intended = []
+        out["intended_platforms"] = intended
+
+        # Read the env directly rather than through settings: this is a runtime
+        # diagnostic about a dependency that is configured at boot, and settings
+        # caches its values at import, so an env change after import is
+        # invisible there. The gateway really does listen on the env value.
+        base = (os.getenv("WORKSPACE_API_BASE") or "").rstrip("/")
+        # The gateway router lives one path up from the openai-compatible base.
+        root = base[:-3] if base.endswith("/v1") else base
+        out["gateway_root"] = root
+
+        email = os.getenv("FREEAPI_ADMIN_EMAIL", "")
+        password = os.getenv("FREEAPI_ADMIN_PASSWORD", "")
+        out["admin_configured"] = bool(email and password)
+        if not root or not email:
+            out["error"] = "no gateway root or no admin credentials to read the key list"
+            return out
+
+        token = ""
+        for path in ("/api/auth/setup", "/api/auth/login"):
+            try:
+                r = httpx.post(root + path, json={"email": email, "password": password}, timeout=15)
+                body = r.json() if r.content else {}
+                token = str(body.get("token") or "")
+            except Exception:
+                token = ""
+            if token:
+                break
+        out["token_acquired"] = bool(token)
+        if not token:
+            out["error"] = "gateway did not issue a dashboard token, so its key list is unreadable"
+            return out
+
+        r = httpx.get(root + "/api/keys", headers={"Authorization": f"Bearer {token}"}, timeout=15)
+        payload = r.json() if r.content else {}
+        keys = payload if isinstance(payload, list) else (payload.get("keys") or [])
+        out["seeded"] = [
+            {"platform": str(k.get("platform")), "label": str(k.get("label") or "")}
+            for k in keys
+        ]
+        out["seeded_platforms"] = sorted({str(k.get("platform")) for k in keys})
+        out["missing"] = sorted(set(intended) - set(out["seeded_platforms"]))
+        out["ok"] = not out["missing"] and bool(out["seeded_platforms"])
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def check_agents() -> list[dict]:
     """Ping each registered workspace agent with a 1-word health probe."""
     from admin.workspace.manager import route_to_agent
@@ -172,6 +243,7 @@ def system_selfcheck(deep: bool = False) -> dict:
         "imports": check_imports(),
         "db": check_db(),
         "llm": check_llm(),
+        "gateway_keys": check_gateway_keys(),
     }
     if deep:
         try:
