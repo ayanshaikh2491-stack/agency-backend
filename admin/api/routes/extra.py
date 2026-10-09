@@ -16,6 +16,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["extra"])
 
+
+@router.get("/api/status/selfcheck")
+async def api_status_selfcheck(deep: bool = False) -> dict[str, Any]:
+    """Expose the CEO's own full-stack scan, including gateway key state.
+
+    system_selfcheck() was written for the CEO to call on itself but nothing
+    ever called it, including the CEO. That is why the gateway was opaque: every
+    agent failed with the same 503 about no usable provider key, and there was
+    no way to ask the service what it actually had. Deep mode probes every
+    agent with a real LLM round trip and is slow; quick mode stays well under
+    the request timeout.
+    """
+    try:
+        from starlette.concurrency import run_in_threadpool
+
+        from admin.agency.runtime_fix import system_selfcheck
+
+        # It is synchronous and does blocking LLM and DB calls, so running it
+        # directly on the event loop would stall every other request on the
+        # worker while it probes.
+        return await run_in_threadpool(system_selfcheck, deep)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
 # The agent-health monitor is a NICE-TO-HAVE dashboard signal, not a hard
 # backend dependency. If the module is ever missing on a box (seen: it was
 # left out of a deploy bundle and the whole backend died at import time, then
