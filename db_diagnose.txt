@@ -7,13 +7,7 @@ key set     = True
 
 --- tags_agency_workspace.db
     expected path : /app/tags_agency_workspace.db
-    exists        : True
-    size          : 1028096
-    is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00,\x00\x00\x00\xfb'
-    is sqlite     : True
-    tables        : 17
-    integrity     : ok
+    exists        : False
 
 --- tags_agency.db
     expected path : /app/tags_agency.db
@@ -28,9 +22,9 @@ key set     = True
 --- freeapi.db
     expected path : /app/server/data/freeapi.db
     exists        : True
-    size          : 913408
+    size          : 958464
     is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x04\x00\x00\x00\xdf'
+    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x05\x00\x00\x00\xea'
     is sqlite     : True
     tables        : 31
     integrity     : ok
@@ -38,10 +32,9 @@ key set     = True
 ======================================================================
 every .db file visible under the app root
 ======================================================================
-      913408  sqlite=True   /app/node_modules/@freellmapi/server/data/freeapi.db
-      913408  sqlite=True   /app/server/data/freeapi.db
+      958464  sqlite=True   /app/node_modules/@freellmapi/server/data/freeapi.db
+      958464  sqlite=True   /app/server/data/freeapi.db
        69632  sqlite=True   /app/tags_agency.db
-     1028096  sqlite=True   /app/tags_agency_workspace.db
 
 ======================================================================
 sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
@@ -50,8 +43,6 @@ sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
            0  /app/node_modules/@freellmapi/server/data/freeapi.db-wal
        32768  /app/server/data/freeapi.db-shm
            0  /app/server/data/freeapi.db-wal
-       32768  /app/tags_agency_workspace.db-shm
-           0  /app/tags_agency_workspace.db-wal
 ======================================================================
 key fingerprint
 ======================================================================
