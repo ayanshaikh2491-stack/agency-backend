@@ -8,9 +8,9 @@ key set     = True
 --- tags_agency_workspace.db
     expected path : /app/tags_agency_workspace.db
     exists        : True
-    size          : 409600
+    size          : 438272
     is file       : True
-    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x0f\x00\x00\x00d'
+    head          : b'SQLite format 3\x00\x10\x00\x02\x02\x00@  \x00\x00\x00\x11\x00\x00\x00k'
     is sqlite     : True
     tables        : 17
     integrity     : ok
@@ -33,7 +33,7 @@ key set     = True
 every .db file visible under the app root
 ======================================================================
        69632  sqlite=True   /app/tags_agency.db
-      409600  sqlite=True   /app/tags_agency_workspace.db
+      438272  sqlite=True   /app/tags_agency_workspace.db
 
 ======================================================================
 sidecar WAL/SHM files (a -wal beside a -db means WAL is live)
